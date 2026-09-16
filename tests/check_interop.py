@@ -2,6 +2,7 @@
 
 Run using pixi run -e oracle python. All generated blocks remain in build/.
 """
+import argparse
 import json
 from pathlib import Path
 import random
@@ -32,11 +33,15 @@ def main() raises:
 
 
 def main():
-    OUT.mkdir(parents=True, exist_ok=True)
-    harness = OUT / "codec_interop.mojo"
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--assertions", choices=("all", "none"), default="all")
+    args = parser.parse_args()
+    out = OUT / args.assertions
+    out.mkdir(parents=True, exist_ok=True)
+    harness = out / "codec_interop.mojo"
     harness.write_text(HARNESS)
-    binary = OUT / "codec-interop"
-    subprocess.run(["pixi", "run", "mojo", "build", "-O3", "-D", "ASSERT=all",
+    binary = out / "codec-interop"
+    subprocess.run(["pixi", "run", "mojo", "build", "-O3", "-D", f"ASSERT={args.assertions}",
                     "-I", "src", str(harness), "-o", str(binary)], cwd=ROOT, check=True)
     rng = random.Random(932847)
     codec = pa.Codec("snappy")
@@ -50,7 +55,7 @@ def main():
             ("cycle", (bytes(range(251)) * (size // 251 + 1))[:size]),
             ("mixed", bytes(rng.randrange(8) for _ in range(size))),
         ]:
-            stem = OUT / f"{size}-{label}"
+            stem = out / f"{size}-{label}"
             raw = stem.with_suffix(".raw")
             native = stem.with_suffix(".native")
             decoded = stem.with_suffix(".decoded")
@@ -69,10 +74,10 @@ def main():
                                 str(decoded), str(size)], check=True)
                 assert decoded.read_bytes() == data, (size, label, name)
             count += 1
-    report = {"fixtures": count, "directions_per_fixture": 4,
+    report = {"assertions": args.assertions, "fixtures": count, "directions_per_fixture": 4,
               "seed": 932847, "pyarrow": pa.__version__,
               "cramjam": cramjam.__version__}
-    (OUT / "results.json").write_text(json.dumps(report, indent=2) + "\n")
+    (out / "results.json").write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps(report))
 
 

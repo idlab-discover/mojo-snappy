@@ -50,9 +50,10 @@ pixi run check
 pixi run -e oracle test-interop
 ```
 
-`check` runs native debug/release tests, tests the precompiled package independently
-of the source import path, and executes the example. The optional oracle environment
-is separately defined and locked in `pixi.toml` / `pixi.lock`. Differential tests
+`check` runs assertion-enabled tests (including optimized `-O3` builds), tests
+source and freshly precompiled package imports with `ASSERT=none`, and executes
+the example. Package consumers are tested independently of the source import path.
+The optional oracle environment is separately defined and locked in `pixi.toml` / `pixi.lock`. Differential tests
 cover both encode/decode directions against PyArrow and cramjam, with generated
 fixtures in ignored `build/`.
 
@@ -68,6 +69,36 @@ mojo-snappy = { path = "../mojo-snappy" }
 `pixi install` builds and installs the package into the consumer's environment;
 `from mojo_snappy import ...` then works without a sibling source include path.
 For direct source use, pass `-I /path/to/mojo-snappy/src` to Mojo.
+
+### Assertion policy
+
+Keep `-D ASSERT=all` for development and correctness checks. The existing
+`test-release` task means an optimized, assertion-enabled build (`-O3`), not a
+checks-disabled build. For an explicitly opted-in release executable:
+
+```sh
+mkdir -p build
+pixi run mojo build -O3 -D ASSERT=none -I src examples/roundtrip.mojo -o build/roundtrip-release
+pixi run test-release-noassert
+pixi run test-package-noassert
+pixi run -e oracle test-interop --assertions none
+```
+
+`ASSERT=none` disables compiler/standard-library assertions throughout the
+consumer, including container bounds diagnostics. It does not disable this
+codec's explicit errors for invalid sizes, source starts, truncated commands,
+invalid offsets, output limits or trailing data. The decoder allocates output
+only as commands are validated, never from the advertised length alone.
+Disabling assertions removes protection against implementation mistakes;
+sampled interoperability tests are not a proof of memory safety. This is an
+opt-in performance configuration, not the default test or package policy.
+
+`mojo precompile` stores non-elaborated code: choose `-O3 -D ASSERT=all` or
+`-O3 -D ASSERT=none` when building the **consumer**, for either source or `.mojoc`
+imports. Precompilation does not freeze a release assertion policy. Report these
+flags with benchmarks; comparisons with native Snappy built with `-DNDEBUG`
+should show both Mojo configurations. Codec algorithms and compressed sizes do
+not change with this policy.
 
 ## Packaging and future distribution
 

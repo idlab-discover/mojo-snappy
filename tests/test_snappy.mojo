@@ -130,5 +130,31 @@ def test_compressed_length_bound() raises:
         _ = snappy_max_compressed_length(0x100000000)
 
 
+def test_validation_without_compiler_assertions() raises:
+    # These must raise explicit codec errors even under ASSERT=none.
+    var empty: List[UInt8] = [0]
+    with assert_raises():
+        _ = decode_snappy(empty, 0x100000000)
+    # A maximum advertised size must not allocate output before validation.
+    var huge: List[UInt8] = [255, 255, 255, 255, 15]
+    with assert_raises():
+        _ = decode_snappy(huge, 0xFFFFFFFF)
+    # Each copy form must reject every truncated offset, including COPY_4.
+    for kind in [1, 2, 3]:
+        var width = 1 if kind == 1 else (2 if kind == 2 else 4)
+        var tag = 1 if kind == 1 else (12 | kind)
+        for count in range(width):
+            var block: List[UInt8] = [5, 0, 120, UInt8(tag)]
+            for i in range(count):
+                block.append(UInt8(1 if i == 0 else 0))
+            with assert_raises():
+                _ = decode_snappy(block, 5)
+    # Four-byte literal lengths must not wrap at the UInt32 boundary.
+    for last in [254, 255]:
+        var block: List[UInt8] = [1, 252, UInt8(last), 255, 255, 255, 120]
+        with assert_raises():
+            _ = decode_snappy(block, 1)
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

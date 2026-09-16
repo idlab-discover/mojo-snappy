@@ -10,11 +10,13 @@ preview = ["pixi-build"]
 [tasks]
 test = "mojo run -D ASSERT=all -I src tests/test_snappy.mojo"
 test-release = "mkdir -p build && mojo build -O3 -D ASSERT=all -I src tests/test_snappy.mojo -o build/test-snappy && build/test-snappy"
+test-release-noassert = "mkdir -p build && mojo build -O3 -D ASSERT=none -I src tests/test_snappy.mojo -o build/test-snappy-noassert && build/test-snappy-noassert"
 package = "mkdir -p build && mojo precompile src/mojo_snappy -o build/mojo_snappy.mojoc"
 test-package = { cmd = "mojo run -D ASSERT=all -I build tests/test_snappy.mojo", depends-on = ["package"] }
+test-package-noassert = { cmd = "mojo run -O3 -D ASSERT=none -I build tests/test_snappy.mojo", depends-on = ["package"] }
 example = "mojo run -I src examples/roundtrip.mojo"
 format = "mojo format src tests examples"
-check = { depends-on = ["test", "test-release", "test-package", "example"] }
+check = { depends-on = ["test", "test-release", "test-package", "test-release-noassert", "test-package-noassert", "example"] }
 
 [dependencies]
 mojo = "==1.0.0"
