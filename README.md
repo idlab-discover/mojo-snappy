@@ -42,7 +42,12 @@ small overlapping patterns and tails. No input padding is required. The encoder
 uses a power-of-two hash table sized to the source suffix (256–16,384 `Int`
 entries), greedy matching and two-byte-offset copies. Inputs shorter than four
 bytes allocate no hash table. Hash reads and initial match comparisons use guarded,
-unaligned four-byte loads; the hash is independent of host byte order.
+unaligned four-byte loads; the hash is independent of host byte order. Large
+inputs compare readable candidates before checking distance, preserving the same
+matches while reducing failed-probe branches. Match extension locates the first
+unequal byte with guarded word XORs, retains 16-byte comparisons for equal long
+runs, and uses scalar tails without reading padding. Encoder bytes are unchanged.
+See [third-party notices](THIRD_PARTY_NOTICES.md) for upstream attribution.
 For suffixes of at least 16 KiB, unsuccessful searches gradually skip positions
 after 128 consecutive probes, with a maximum 16-byte stride. Every match resets
 the search to consecutive positions. Shorter inputs use exhaustive search.

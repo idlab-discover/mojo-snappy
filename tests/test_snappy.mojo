@@ -5,7 +5,7 @@ from mojo_snappy import (
     decode_snappy,
     snappy_max_compressed_length,
 )
-from mojo_snappy.codec import _hash_table_size, _load4, _copy
+from mojo_snappy.codec import _hash_table_size, _load4, _copy, _match_length
 
 
 def test_roundtrip_and_compression() raises:
@@ -367,6 +367,38 @@ def test_decoder_literal_width_boundaries() raises:
             var decoded = decode_snappy(block, count)
             for i in range(count):
                 assert_equal(decoded[i], UInt8(i & 255))
+
+
+def test_encoder_word_match_boundaries() raises:
+    # The first four bytes have already matched. Cover every remaining byte
+    # around word/vector boundaries, with exact-size storage and overlap.
+    for alignment in range(16):
+        for offset in [1, 2, 3, 4, 7, 8, 15, 16, 31, 32, 33]:
+            var pos = alignment + offset
+            for available in range(41):
+                for mismatch in range(available + 1):
+                    var data = List[UInt8](length=pos + 4 + available, fill=0)
+                    if mismatch < available:
+                        data[pos + 4 + mismatch] = 128
+                    assert_equal(
+                        _match_length(data, alignment, pos), 4 + mismatch
+                    )
+
+
+def test_encoder_word_suffix_limits() raises:
+    for alignment in range(16):
+        for length in [4, 7, 8, 11, 12, 15, 16, 19, 20, 31, 32, 33, 64, 65]:
+            var data = List[UInt8](length=alignment, fill=255)
+            for i in range(length):
+                data.append(UInt8(i % 7))
+            var expected = List[UInt8](data[alignment:])
+            var encoded = encode_snappy(
+                data, snappy_max_compressed_length(length), alignment
+            )
+            assert_equal(decode_snappy(encoded, length), expected)
+            assert_equal(encode_snappy(data, len(encoded), alignment), encoded)
+            with assert_raises():
+                _ = encode_snappy(data, len(encoded) - 1, alignment)
 
 
 def main() raises:

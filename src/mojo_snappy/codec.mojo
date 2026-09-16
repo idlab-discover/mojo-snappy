@@ -7,7 +7,7 @@ No framing, Python, or external codec library is involved.
 """
 
 
-from std.bit import byte_swap
+from std.bit import byte_swap, count_trailing_zeros
 from std.sys.info import is_big_endian
 
 
@@ -200,6 +200,64 @@ def _load4(data: List[UInt8], pos: Int) -> UInt32:
         return word
 
 
+@always_inline
+def _match_length(data: List[UInt8], candidate: Int, pos: Int) -> Int:
+    """Extend four equal bytes, with start <= candidate < pos <= len(data)-4.
+
+    The guarded current read proves the earlier candidate read also fits,
+    including overlap: both read the immutable input, not a growing output.
+    count <= len(data)-pos keeps each addition within the validated list.
+    Normalize only unequal words before locating their first different byte.
+    The short-match XOR strategy follows Google Snappy's FindMatchLength;
+    see THIRD_PARTY_NOTICES.md. No speculative next-probe loads are performed.
+    """
+    var count = 4
+    while len(data) - pos - count >= 8:
+        var current = (
+            data.unsafe_ptr()
+            .unsafe_offset(pos + count)
+            .unsafe_bitcast[UInt64]()
+            .unsafe_load[alignment=1]()
+        )
+        var previous = (
+            data.unsafe_ptr()
+            .unsafe_offset(candidate + count)
+            .unsafe_bitcast[UInt64]()
+            .unsafe_load[alignment=1]()
+        )
+        var different = current ^ previous
+        if different != 0:
+            comptime if is_big_endian():
+                different = byte_swap(different)
+            # Four-byte matches are common: avoid bit-scan latency when the
+            # very first extension byte differs. This is data-independent
+            # policy: the same exact match length is returned on every path.
+            if UInt8(different) != 0:
+                return count
+            return count + Int(count_trailing_zeros(different)) // 8
+        count += 8
+        # Keep equal long runs at the existing 16-byte comparison width.
+        while len(data) - pos - count >= 16:
+            var current16 = (
+                data.unsafe_ptr()
+                .unsafe_offset(pos + count)
+                .unsafe_load[width=16]()
+            )
+            var previous16 = (
+                data.unsafe_ptr()
+                .unsafe_offset(candidate + count)
+                .unsafe_load[width=16]()
+            )
+            if current16 != previous16:
+                break
+            count += 16
+    while (
+        count < len(data) - pos and data[candidate + count] == data[pos + count]
+    ):
+        count += 1
+    return count
+
+
 def _hash4(data: List[UInt8], pos: Int) -> Int:
     var word = _load4(data, pos)
     return Int((word * UInt32(0x1E35A7BD)) >> 18)
@@ -241,7 +299,15 @@ def _encode_snappy[
         table_size = 16384
     else:
         table_size = _hash_table_size(len(data) - start)
-    var table = List[Int](length=table_size, fill=-1)
+    # Large probes compare bytes first to avoid unpredictable occupancy/age
+    # branches on misses. Initialize to a readable position in this suffix.
+    # Int entries preserve arbitrary validated absolute starts, even >4 GiB.
+    var initial: Int
+    comptime if large:
+        initial = start
+    else:
+        initial = -1
+    var table = List[Int](length=table_size, fill=initial)
     var pos = start
     var literal_start = start
     # Large inputs start with 128 consecutive probes. After misses the stride
@@ -250,15 +316,26 @@ def _encode_snappy[
     # Small inputs retain exhaustive search without runtime policy overhead.
     var skip = 128
     while len(data) - pos >= 4:
-        var slot = _hash4(data, pos) & (table_size - 1)
+        var word = _load4(data, pos)
+        var slot = Int((word * UInt32(0x1E35A7BD)) >> 18) & (table_size - 1)
         var candidate = table[slot]
         table[slot] = pos
-        # Every populated entry was stored at an earlier position in this
-        # suffix. Thus start <= candidate < pos <= len(data)-4, proving both
-        # four-byte reads safe. The hash mask is within the initialized table.
-        var matches = candidate >= start and pos - candidate <= 65535
-        if matches:
-            matches = _load4(data, candidate) == _load4(data, pos)
+        # The mask addresses initialized state. On the large path every
+        # entry is in [start, pos], so both four-byte reads fit. An untouched
+        # slot refers to start: its bytes cannot equal this word unless its
+        # hash equals hash(start), whose slot was populated by the first
+        # probe. Reject the initial zero offset explicitly. This sentinel
+        # therefore preserves the old unpopulated-slot decisions exactly.
+        # Small inputs keep -1 and guard occupancy before reading.
+        var matches: Bool
+        comptime if large:
+            matches = _load4(data, candidate) == word
+            if matches:
+                matches = pos > candidate and pos - candidate <= 65535
+        else:
+            matches = candidate >= start and pos - candidate <= 65535
+            if matches:
+                matches = _load4(data, candidate) == word
         if not matches:
             comptime if large:
                 var step = skip >> 7
@@ -277,29 +354,7 @@ def _encode_snappy[
         )
         # Restore dense search immediately after every successful match.
         skip = 128
-        var count = 4
-        # Both loads stay within the source, including overlapping matches.
-        # Fall back to byte comparisons at the first unequal vector or tail.
-        comptime width = 16
-        while len(data) - pos - count >= width:
-            var current = (
-                data.unsafe_ptr()
-                .unsafe_offset(pos + count)
-                .unsafe_load[width=width]()
-            )
-            var previous = (
-                data.unsafe_ptr()
-                .unsafe_offset(candidate + count)
-                .unsafe_load[width=width]()
-            )
-            if current != previous:
-                break
-            count += width
-        while (
-            pos + count < len(data)
-            and data[candidate + count] == data[pos + count]
-        ):
-            count += 1
+        var count = _match_length(data, candidate, pos)
         var offset = pos - candidate
         var left = count
         while left > 0:
