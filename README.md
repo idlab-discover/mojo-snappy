@@ -36,7 +36,10 @@ The public functions borrow `List[UInt8]` inputs and return owned byte lists:
   for input lengths from zero through `2**32 - 1`.
 
 The decoder handles all copy forms and overlapping backreferences. The encoder
-uses a 16,384-entry hash table, greedy matching and two-byte-offset copies.
+uses a power-of-two hash table sized to the source suffix (256–16,384 `Int`
+entries), greedy matching and two-byte-offset copies. Inputs shorter than four
+bytes allocate no hash table. Hash reads and initial match comparisons use guarded,
+unaligned four-byte loads; the hash is independent of host byte order.
 Limits constrain byte-list lengths; standard-library capacity growth and allocator
 overhead mean these are not exact allocation or RSS limits. No speed claims have
 been established against optimized reference implementations.

@@ -5,6 +5,7 @@ from mojo_snappy import (
     decode_snappy,
     snappy_max_compressed_length,
 )
+from mojo_snappy.codec import _hash_table_size, _load4
 
 
 def test_roundtrip_and_compression() raises:
@@ -154,6 +155,67 @@ def test_validation_without_compiler_assertions() raises:
         var block: List[UInt8] = [1, 252, UInt8(last), 255, 255, 255, 120]
         with assert_raises():
             _ = decode_snappy(block, 1)
+
+
+def test_hash_state_bounds_and_word_byte_order() raises:
+    assert_equal(_hash_table_size(0), 256)
+    for boundary in [256, 512, 1024, 2048, 4096, 8192, 16384]:
+        assert_equal(_hash_table_size(boundary - 1), boundary)
+        assert_equal(_hash_table_size(boundary), boundary)
+        assert_equal(_hash_table_size(boundary + 1), min(2 * boundary, 16384))
+    # Exercise arithmetic at the format limit without allocating that input.
+    assert_equal(_hash_table_size(0xFFFFFFFF), 16384)
+    for start in range(8):
+        var data = List[UInt8](length=start, fill=0)
+        data.append(0x01)
+        data.append(0x23)
+        data.append(0x45)
+        data.append(0xFE)
+        assert_equal(_load4(data, start), UInt32(0xFE452301))
+
+
+def test_encoder_word_tails_and_suffix_alignment() raises:
+    # Every alignment, four-byte boundary and SIMD tail; the last four bytes
+    # repeat an earlier word and can be a match at the final legal read.
+    for start in range(8):
+        for size in range(40):
+            var data = List[UInt8](length=start, fill=255)
+            var expected = List[UInt8]()
+            for i in range(size):
+                var byte = UInt8(i % 7)
+                expected.append(byte)
+                data.append(byte)
+            var encoded = encode_snappy(
+                data, snappy_max_compressed_length(size), start
+            )
+            assert_equal(decode_snappy(encoded, size), expected)
+            assert_equal(encode_snappy(data, len(encoded), start), encoded)
+            with assert_raises():
+                _ = encode_snappy(data, len(encoded) - 1, start)
+
+
+def test_encoder_table_transitions_and_collisions() raises:
+    for boundary in [16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]:
+        for delta in [-1, 0, 1]:
+            var size = boundary + delta
+            var expected = List[UInt8]()
+            var state = UInt32(932847)
+            # Repeated and distinct words share a bounded table. A hash hit
+            # alone must never emit a copy without comparing all four bytes.
+            for i in range(size):
+                state = state * UInt32(1664525) + UInt32(1013904223)
+                expected.append(UInt8((state >> 24) & 15))
+            for i in range(4):
+                expected[size - 4 + i] = expected[i]
+            var data: List[UInt8] = [99, 98, 97]
+            data.extend(expected.copy())
+            var encoded = encode_snappy(
+                data, snappy_max_compressed_length(size), 3
+            )
+            assert_equal(decode_snappy(encoded, size), expected)
+            assert_equal(encode_snappy(data, len(encoded), 3), encoded)
+            with assert_raises():
+                _ = encode_snappy(data, len(encoded) - 1, 3)
 
 
 def main() raises:

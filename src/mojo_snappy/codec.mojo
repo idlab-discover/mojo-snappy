@@ -1,9 +1,14 @@
-"""Native raw Snappy blocks with caller-bounded output and fixed match state.
+"""Native raw Snappy blocks with caller-bounded output and bounded match state.
 
-The encoder uses a greedy, single-candidate 16K hash table and a 64K lookback.
+The encoder uses a greedy, single-candidate hash table of at most 16K entries
+and a 64K lookback.
 The decoder accepts all three copy forms, including overlapping backreferences.
 No framing, Python, or external codec library is involved.
 """
+
+
+from std.bit import byte_swap
+from std.sys.info import is_big_endian
 
 
 def _read_le(data: List[UInt8], mut cursor: Int, count: Int) raises -> Int:
@@ -121,10 +126,40 @@ def _literal(
     output.extend(data[start : start + count])
 
 
+def _hash_table_size(size: Int) -> Int:
+    """Power-of-two entry count for a validated suffix size, clamped to 256..16K.
+
+    Bound before doubling so even a UInt32-maximum suffix needs no large
+    intermediate calculation. Entries remain Int absolute positions: a legal
+    suffix can start beyond 4 GiB in its source list.
+    """
+    var count = 256
+    while count < min(size, 16384):
+        count *= 2
+    return count
+
+
+def _load4(data: List[UInt8], pos: Int) -> UInt32:
+    """Load four bytes after the caller proves 0 <= pos <= len(data) - 4.
+
+    The borrowed input stays alive and cannot grow during encoding. The pointer
+    is used only for this load; byte alignment is sufficient. Normalize the
+    word to little endian so hash choices are independent of host byte order.
+    """
+    var word = (
+        data.unsafe_ptr()
+        .unsafe_offset(pos)
+        .unsafe_bitcast[UInt32]()
+        .unsafe_load[alignment=1]()
+    )
+    comptime if is_big_endian():
+        return byte_swap(word)
+    else:
+        return word
+
+
 def _hash4(data: List[UInt8], pos: Int) -> Int:
-    var word = UInt32(data[pos]) | (UInt32(data[pos + 1]) << 8)
-    word |= UInt32(data[pos + 2]) << 16
-    word |= UInt32(data[pos + 3]) << 24
+    var word = _load4(data, pos)
     return Int((word * UInt32(0x1E35A7BD)) >> 18)
 
 
@@ -135,10 +170,16 @@ def snappy_max_compressed_length(size: Int) raises -> Int:
     return 32 + size + size // 6
 
 
-def encode_snappy(
-    data: List[UInt8], max_output_bytes: Int, start: Int = 0
-) raises -> List[UInt8]:
-    """Encode a raw block, raising before output length exceeds the limit."""
+def _encode_snappy[
+    large: Bool
+](data: List[UInt8], max_output_bytes: Int, start: Int = 0) raises -> List[
+    UInt8
+]:
+    """Encode with a constant full-table mask or an input-sized small table.
+
+    Specializing the full-table path avoids carrying a dynamic mask through
+    long matches. Both paths keep input validation and output-limit errors.
+    """
     if start < 0 or start > len(data):
         raise Error("Invalid Snappy source start")
     if max_output_bytes < 0 or UInt64(len(data) - start) > UInt64(0xFFFFFFFF):
@@ -149,19 +190,28 @@ def encode_snappy(
         _put(output, (remaining & 127) | 128, max_output_bytes)
         remaining >>= 7
     _put(output, remaining, max_output_bytes)
-    var table = List[Int](length=16384, fill=-1)
+    # No match is possible; avoid allocating any hash state.
+    if len(data) - start < 4:
+        _literal(data, start, len(data) - start, output, max_output_bytes)
+        return output^
+    var table_size: Int
+    comptime if large:
+        table_size = 16384
+    else:
+        table_size = _hash_table_size(len(data) - start)
+    var table = List[Int](length=table_size, fill=-1)
     var pos = start
     var literal_start = start
-    while pos + 4 <= len(data):
-        var slot = _hash4(data, pos)
+    while len(data) - pos >= 4:
+        var slot = _hash4(data, pos) & (table_size - 1)
         var candidate = table[slot]
         table[slot] = pos
-        var matches = candidate >= 0 and pos - candidate <= 65535
+        # Every populated entry was stored at an earlier position in this
+        # suffix. Thus start <= candidate < pos <= len(data)-4, proving both
+        # four-byte reads safe. The hash mask is within the initialized table.
+        var matches = candidate >= start and pos - candidate <= 65535
         if matches:
-            for i in range(4):
-                if data[candidate + i] != data[pos + i]:
-                    matches = False
-                    break
+            matches = _load4(data, candidate) == _load4(data, pos)
         if not matches:
             pos += 1
             continue
@@ -172,7 +222,7 @@ def encode_snappy(
         # Both loads stay within the source, including overlapping matches.
         # Fall back to byte comparisons at the first unequal vector or tail.
         comptime width = 16
-        while pos + count + width <= len(data):
+        while len(data) - pos - count >= width:
             var current = (
                 data.unsafe_ptr()
                 .unsafe_offset(pos + count)
@@ -204,9 +254,22 @@ def encode_snappy(
         literal_start = pos
         # Retain a recent candidate after long runs without work proportional
         # to every skipped byte in the matched span.
-        if pos >= start + 2 and pos + 2 <= len(data):
-            table[_hash4(data, pos - 2)] = pos - 2
+        if pos - start >= 2 and len(data) - pos >= 2:
+            table[_hash4(data, pos - 2) & (table_size - 1)] = pos - 2
     _literal(
         data, literal_start, len(data) - literal_start, output, max_output_bytes
     )
     return output^
+
+
+def encode_snappy(
+    data: List[UInt8], max_output_bytes: Int, start: Int = 0
+) raises -> List[UInt8]:
+    """Encode a raw block, raising before output length exceeds the limit."""
+    # Validate before subtracting for dispatch; the implementation validates
+    # the remaining public arguments before allocating or accessing input.
+    if start < 0 or start > len(data):
+        raise Error("Invalid Snappy source start")
+    if len(data) - start >= 16384:
+        return _encode_snappy[True](data, max_output_bytes, start)
+    return _encode_snappy[False](data, max_output_bytes, start)
