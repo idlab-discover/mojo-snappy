@@ -28,15 +28,79 @@ def _read_le[count: Int](data: List[UInt8], mut cursor: Int) raises -> Int:
 
 
 @always_inline
+def _pattern_copy[period: Int](mut result: List[UInt8], var count: Int):
+    """Expand an initialized period into exact, phase-correct vector appends.
+
+    Caller proves 2 <= period < 16, period <= len(result), 16 <= count <= 64,
+    and len(result) + count <= expected_size. Only the last period bytes are
+    read; every seed lane is initialized before pattern construction. After
+    writing 16 bytes, lane i must represent old lane (i + 16) % period.
+    Each extend writes at most the remaining count and updates initialized
+    length. No pointer survives growth, and no spare capacity is read.
+    Pattern rotation follows Google Snappy's short-pattern extension idea;
+    see THIRD_PARTY_NOTICES.md. Unlike its slack copies, writes are exact.
+    """
+    comptime assert 2 <= period < 16
+    var end = len(result) + count
+    if end > result.capacity():
+        result.reserve(max(end, 2 * result.capacity()))
+    comptime if period == 4:
+        var seed4 = (
+            result.unsafe_ptr()
+            .unsafe_offset(len(result) - 4)
+            .unsafe_load[width=4]()
+        )
+        var eight = seed4.join(seed4)
+        var sixteen = eight.join(eight)
+        var wide = sixteen.join(sixteen)
+        if count == 64:
+            result.extend(wide.join(wide))
+        else:
+            result.extend(wide.join(wide), count=count)
+        return
+    var seed = SIMD[DType.uint8, 16](0)
+    comptime for i in range(period):
+        seed[i] = result[len(result) - period + i]
+    var pattern = SIMD[DType.uint8, 16](0)
+    comptime for i in range(16):
+        pattern[i] = seed[i % period]
+    while count >= 16:
+        result.extend(pattern)
+        var next_pattern = SIMD[DType.uint8, 16](0)
+        comptime for i in range(16):
+            next_pattern[i] = pattern[(i + 16) % period]
+        pattern = next_pattern
+        count -= 16
+    if count:
+        result.extend(pattern, count=count)
+
+
+@no_inline
+def _expand_pattern(mut result: List[UInt8], offset: Int, count: Int):
+    """Dispatch a validated offset 2..15 and count 16..64.
+
+    Keep uncommon period construction outside the ordinary copy loop.
+    """
+    comptime for period in range(2, 16):
+        if offset == period:
+            _pattern_copy[period](result, count)
+            return
+
+
+@always_inline
 def _copy(mut result: List[UInt8], offset: Int, var count: Int):
     """Append a validated backreference, including bytes produced by this copy.
 
     Caller proves 0 < offset <= len(result), 1 <= count <= 64, and
     len(result) + count <= expected_size. Reserve only this validated command.
-    A width-W load requires offset >= W and count >= W: its source ends at
+    A direct width-W load requires offset >= W and count >= W: it ends at
     or before the current initialized length. Each extend initializes the next
     W bytes before a later load can reference them. Only SIMD values, never
-    pointers, survive an extend; all writes fit the reserved end.
+    pointers, survive an extend; all writes fit the reserved end. Short periods
+    instead construct initialized vectors from an exact seed. Offset four
+    repeats one four-byte seed to 64 bytes in registers: 64 % 4 == 0, and the
+    bounded partial extend writes only count bytes. No enlarged logical length
+    or uninitialized storage is exposed on either normal or error exits.
     """
     if count >= 16 and offset == 1:
         var end = len(result) + count
@@ -59,6 +123,9 @@ def _copy(mut result: List[UInt8], offset: Int, var count: Int):
                 )
                 result.extend(bytes)
                 count -= 16
+        elif count >= 16:
+            _expand_pattern(result, offset, count)
+            return
         while count >= 4:
             var bytes = (
                 result.unsafe_ptr()
@@ -67,8 +134,12 @@ def _copy(mut result: List[UInt8], offset: Int, var count: Int):
             )
             result.extend(bytes)
             count -= 4
-    # Offsets 1..3 and final tails use forward byte copies. In particular, a
-    # small repeating pattern must grow before its new bytes can be read.
+    if count >= 16:
+        # Only offsets two and three remain after the paths above.
+        _expand_pattern(result, offset, count)
+        return
+    # Short offsets 1..3 and final tails use forward byte copies; every source
+    # byte is initialized before append makes it available to later iterations.
     for _ in range(count):
         var byte = result[len(result) - offset]
         result.append(byte)

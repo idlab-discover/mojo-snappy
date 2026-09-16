@@ -1,9 +1,11 @@
 # Google Snappy
 
-The encoder word-XOR match extension and readable initial hash candidate strategy
-are adapted from ideas in Google Snappy 1.2.2, revision
+The encoder word-XOR match extension, readable initial hash candidate strategy,
+and decoder short-pattern expansion are adapted from ideas in Google Snappy
+1.2.2, revision
 `6af9287fbdb913f0794d0148c6aa43b58e63c8e3` (`FindMatchLength`,
-`CompressFragment`, and `WorkingMemory::GetHashTable`).
+`CompressFragment`, `WorkingMemory::GetHashTable`,
+`Copy64BytesWithPatternExtension`, and `IncrementalCopy`).
 
 Copyright 2011, Google Inc.
 All rights reserved.

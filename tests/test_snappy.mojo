@@ -281,7 +281,28 @@ def _append_varint(mut block: List[UInt8], var value: Int):
 def test_decoder_copy_widths_and_tails() raises:
     # Every length, all forms, growing overlap and non-overlap at both widths.
     for kind in [1, 2, 3]:
-        for offset in [1, 2, 3, 4, 7, 8, 15, 16, 17, 31, 32, 33]:
+        for offset in [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12,
+            13,
+            14,
+            15,
+            16,
+            17,
+            31,
+            32,
+            33,
+        ]:
             for count in range(1, 65):
                 if kind == 1 and (count < 4 or count > 11):
                     continue
@@ -318,7 +339,28 @@ def test_decoder_copy_widths_and_tails() raises:
 
 def test_decoder_copy_capacity_transitions() raises:
     # Exercise exact reserved boundaries independently of List growth policy.
-    for offset in [1, 2, 3, 4, 7, 8, 15, 16, 17, 31, 32, 33]:
+    for offset in [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        31,
+        32,
+        33,
+    ]:
         for count in range(1, 65):
             for spare in [0, count - 1, count, count + 1]:
                 var output = List[UInt8](capacity=offset + spare)
@@ -399,6 +441,63 @@ def test_encoder_word_suffix_limits() raises:
             assert_equal(encode_snappy(data, len(encoded), alignment), encoded)
             with assert_raises():
                 _ = encode_snappy(data, len(encoded) - 1, alignment)
+
+
+def test_decoder_pattern_phases_and_capacity() raises:
+    # Unique seed bytes reveal phase errors, including periods not dividing 16.
+    # Exact capacities expose command tails and genuine reallocating growth.
+    for period in range(2, 16):
+        for phase in range(period):
+            for padding in [0, 15, 16, 17]:
+                var prefix = padding + period
+                for count in range(1, 65):
+                    for spare in [0, count - 1, count, count + 1]:
+                        var output = List[UInt8](capacity=prefix + spare)
+                        assert_equal(output.capacity(), prefix + spare)
+                        for _ in range(padding):
+                            output.append(201)
+                        for i in range(period):
+                            output.append(UInt8(65 + (phase + i) % period))
+                        var old_capacity = output.capacity()
+                        _copy(output, period, count)
+                        assert_equal(len(output), prefix + count)
+                        assert_true(output.capacity() >= prefix + count)
+                        if spare < count:
+                            assert_true(output.capacity() > old_capacity)
+                        else:
+                            assert_equal(output.capacity(), old_capacity)
+                        for i in range(padding):
+                            assert_equal(output[i], UInt8(201))
+                        for i in range(period + count):
+                            assert_equal(
+                                output[padding + i],
+                                UInt8(65 + (phase + i) % period),
+                            )
+
+
+def test_decoder_encoder_produced_patterns() raises:
+    for period in [1, 2, 3, 4, 5, 7, 8, 15, 16, 17]:
+        for phase in range(period):
+            for count in [
+                1,
+                period - 1,
+                period,
+                period + 1,
+                15,
+                16,
+                17,
+                63,
+                64,
+                65,
+                257,
+            ]:
+                var expected = List[UInt8]()
+                for i in range(count):
+                    expected.append(UInt8(65 + (phase + i) % period))
+                var encoded = encode_snappy(
+                    expected, snappy_max_compressed_length(count)
+                )
+                assert_equal(decode_snappy(encoded, count), expected)
 
 
 def main() raises:

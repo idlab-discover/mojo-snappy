@@ -37,10 +37,13 @@ The public functions borrow `List[UInt8]` inputs and return owned byte lists:
 
 The decoder handles all copy forms and overlapping backreferences. Fixed-width
 reads check truncation before accessing bytes. Backreferences use bounded 16-byte
-and 4-byte copies where the source is initialized, with forward byte copies for
-small overlapping patterns and tails. No input padding is required. The encoder
-uses a power-of-two hash table sized to the source suffix (256–16,384 `Int`
-entries), greedy matching and two-byte-offset copies. Inputs shorter than four
+and 4-byte copies where the source is initialized. Longer copies at offsets 2–15
+expand an initialized seed into repeating vectors; rotations preserve the phase
+when the period does not divide the vector width. Offset four uses one bounded
+append, while short copies and tails retain forward byte copying. All writes fit
+the validated command, and output grows incrementally. No input padding is
+required. The encoder uses a power-of-two hash table sized to the source suffix
+(256–16,384 `Int` entries), greedy matching and two-byte-offset copies. Inputs shorter than four
 bytes allocate no hash table. Hash reads and initial match comparisons use guarded,
 unaligned four-byte loads; the hash is independent of host byte order. Large
 inputs compare readable candidates before checking distance, preserving the same
