@@ -1,0 +1,54 @@
+[workspace]
+authors = ["Str-Gen <20303842+Str-Gen@users.noreply.github.com>"]
+channels = ["https://conda.modular.com/max", "conda-forge"]
+name = "mojo-snappy"
+platforms = ["linux-64"]
+version = "0.1.0"
+description = "Raw Snappy compression and decompression in Mojo"
+preview = ["pixi-build"]
+
+[tasks]
+test = "mojo run -D ASSERT=all -I src tests/test_snappy.mojo"
+test-release = "mkdir -p build && mojo build -O3 -D ASSERT=all -I src tests/test_snappy.mojo -o build/test-snappy && build/test-snappy"
+package = "mkdir -p build && mojo precompile src/mojo_snappy -o build/mojo_snappy.mojoc"
+test-package = { cmd = "mojo run -D ASSERT=all -I build tests/test_snappy.mojo", depends-on = ["package"] }
+example = "mojo run -I src examples/roundtrip.mojo"
+format = "mojo format src tests examples"
+check = { depends-on = ["test", "test-release", "test-package", "example"] }
+
+[dependencies]
+mojo = "==1.0.0"
+
+[package]
+name = "mojo-snappy"
+version = "0.1.0"
+
+[package.build]
+backend = { name = "pixi-build-mojo", version = "0.*", channels = ["https://prefix.dev/pixi-build-backends", "conda-forge"] }
+
+[package.build.config.pkg]
+name = "mojo_snappy"
+path = "src/mojo_snappy"
+
+[package.build-dependencies]
+mojo-compiler = "==1.0.0"
+
+[package.host-dependencies]
+mojo-compiler = "==1.0.0"
+
+[package.run-dependencies]
+mojo-compiler = "==1.0.0"
+
+[feature.oracle.dependencies]
+python = "3.12.*"
+
+[feature.oracle.pypi-dependencies]
+pyarrow = "==25.0.1"
+cramjam = "==2.12.1"
+
+[feature.oracle.tasks]
+test-interop = "python tests/check_interop.py"
+
+[environments]
+default = { features = [], solve-group = "default" }
+oracle = { features = ["oracle"], solve-group = "default" }

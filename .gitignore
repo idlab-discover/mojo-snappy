@@ -1,0 +1,9 @@
+.pixi/
+/build/
+/output/
+/docs/private/
+/profiling/
+/benchmarks/
+*.mojoc
+__pycache__/
+*.py[cod]
