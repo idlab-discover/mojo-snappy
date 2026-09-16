@@ -218,5 +218,58 @@ def test_encoder_table_transitions_and_collisions() raises:
                 _ = encode_snappy(data, len(encoded) - 1, 3)
 
 
+def test_adaptive_search_recovery_and_literal_tails() raises:
+    # Long random runs must not prevent recovery when repetition resumes.
+    # Include stride transitions, suffix-relative 64K boundaries and every
+    # final literal tail. Compression checks allow changed match choices.
+    for prefix in [127, 128, 129, 1023, 65535, 65536, 65537, 262144]:
+        for tail in range(4):
+            var expected = List[UInt8]()
+            var state = UInt32(932847)
+            for _ in range(prefix):
+                state = state * UInt32(1664525) + UInt32(1013904223)
+                expected.append(UInt8(state >> 24))
+            for _ in range(256):
+                expected.append(42)
+            # Keep even the early transition cases on the adaptive large path.
+            var padding = max(0, 16384 - prefix - 256 - tail)
+            for _ in range(padding):
+                state = state * UInt32(1664525) + UInt32(1013904223)
+                expected.append(UInt8(state >> 24))
+            for i in range(tail):
+                expected.append(UInt8(200 + i))
+            var data: List[UInt8] = [90, 91, 92]
+            data.extend(expected.copy())
+            var encoded = encode_snappy(
+                data, snappy_max_compressed_length(len(expected)), 3
+            )
+            assert_equal(decode_snappy(encoded, len(expected)), expected)
+            # Two probes at most 16 bytes apart recover the constant island;
+            # leave room for literal headers, copy tags and the final tail.
+            assert_true(len(encoded) < prefix + padding + 80)
+            assert_equal(encode_snappy(data, len(encoded), 3), encoded)
+            with assert_raises():
+                _ = encode_snappy(data, len(encoded) - 1, 3)
+
+
+def test_adaptive_search_long_runs_and_short_islands() raises:
+    var expected = List[UInt8]()
+    var state = UInt32(932847)
+    # Repeatedly exercise the saturated counter and islands shorter than its
+    # stride. Missing a match is allowed; losing any skipped input byte is not.
+    for band in range(64):
+        for _ in range(65536 + band % 4):
+            state = state * UInt32(1664525) + UInt32(1013904223)
+            expected.append(UInt8(state >> 24))
+        for _ in range(8):
+            expected.append(42)
+    for i in range(256):
+        expected.append(UInt8(i % 7))
+    var encoded = encode_snappy(
+        expected, snappy_max_compressed_length(len(expected))
+    )
+    assert_equal(decode_snappy(encoded, len(expected)), expected)
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

@@ -202,6 +202,11 @@ def _encode_snappy[
     var table = List[Int](length=table_size, fill=-1)
     var pos = start
     var literal_start = start
+    # Large inputs start with 128 consecutive probes. After misses the stride
+    # grows with bytes passed, but never exceeds 16. Unlike an unbounded search,
+    # a long random prefix cannot leave arbitrarily wide gaps between probes.
+    # Small inputs retain exhaustive search without runtime policy overhead.
+    var skip = 128
     while len(data) - pos >= 4:
         var slot = _hash4(data, pos) & (table_size - 1)
         var candidate = table[slot]
@@ -213,11 +218,23 @@ def _encode_snappy[
         if matches:
             matches = _load4(data, candidate) == _load4(data, pos)
         if not matches:
-            pos += 1
+            comptime if large:
+                var step = skip >> 7
+                # The last increment can reach at most 2062, so step remains
+                # <= 16 and the counter cannot grow with the input length.
+                if skip < 2048:
+                    skip += step
+                # Clamp before addition, including near an absolute Int limit.
+                # Skipped bytes remain in the pending literal, not discarded.
+                pos += min(step, len(data) - pos)
+            else:
+                pos += 1
             continue
         _literal(
             data, literal_start, pos - literal_start, output, max_output_bytes
         )
+        # Restore dense search immediately after every successful match.
+        skip = 128
         var count = 4
         # Both loads stay within the source, including overlapping matches.
         # Fall back to byte comparisons at the first unequal vector or tail.

@@ -40,9 +40,16 @@ uses a power-of-two hash table sized to the source suffix (256–16,384 `Int`
 entries), greedy matching and two-byte-offset copies. Inputs shorter than four
 bytes allocate no hash table. Hash reads and initial match comparisons use guarded,
 unaligned four-byte loads; the hash is independent of host byte order.
+For suffixes of at least 16 KiB, unsuccessful searches gradually skip positions
+after 128 consecutive probes, with a maximum 16-byte stride. Every match resets
+the search to consecutive positions. Shorter inputs use exhaustive search.
+Skipped bytes remain literals: this trades some compression density for less
+probing in incompressible regions and can miss short repeated islands. The stride
+bound applies across the entire suffix; 64 KiB is a lookback limit, not an input
+or Parquet page-size limit.
 Limits constrain byte-list lengths; standard-library capacity growth and allocator
-overhead mean these are not exact allocation or RSS limits. No speed claims have
-been established against optimized reference implementations.
+overhead mean these are not exact allocation or RSS limits. Speed and compression
+density depend on the input and assertion policy.
 
 ## Develop and verify
 
