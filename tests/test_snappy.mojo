@@ -5,7 +5,7 @@ from mojo_snappy import (
     decode_snappy,
     snappy_max_compressed_length,
 )
-from mojo_snappy.codec import _hash_table_size, _load4
+from mojo_snappy.codec import _hash_table_size, _load4, _copy
 
 
 def test_roundtrip_and_compression() raises:
@@ -269,6 +269,104 @@ def test_adaptive_search_long_runs_and_short_islands() raises:
         expected, snappy_max_compressed_length(len(expected))
     )
     assert_equal(decode_snappy(encoded, len(expected)), expected)
+
+
+def _append_varint(mut block: List[UInt8], var value: Int):
+    while value >= 128:
+        block.append(UInt8((value & 127) | 128))
+        value >>= 7
+    block.append(UInt8(value))
+
+
+def test_decoder_copy_widths_and_tails() raises:
+    # Every length, all forms, growing overlap and non-overlap at both widths.
+    for kind in [1, 2, 3]:
+        for offset in [1, 2, 3, 4, 7, 8, 15, 16, 17, 31, 32, 33]:
+            for count in range(1, 65):
+                if kind == 1 and (count < 4 or count > 11):
+                    continue
+                var block: List[UInt8] = [99, 98, 97]
+                _append_varint(block, offset + count)
+                block.append(UInt8((offset - 1) << 2))
+                var expected = List[UInt8]()
+                for i in range(offset):
+                    block.append(UInt8(i))
+                    expected.append(UInt8(i))
+                var tag = ((count - 1) << 2) | kind
+                if kind == 1:
+                    tag = ((count - 4) << 2) | 1
+                block.append(UInt8(tag))
+                var width = 1 if kind == 1 else (2 if kind == 2 else 4)
+                for i in range(width):
+                    block.append(UInt8((offset >> (8 * i)) & 255))
+                for i in range(count):
+                    expected.append(UInt8(i % offset))
+                assert_equal(decode_snappy(block, len(expected), 3), expected)
+                # Keep the declared size correct but exceed it with the copy.
+                var short = block.copy()
+                short[3] -= 1
+                with assert_raises():
+                    _ = decode_snappy(short, len(expected) - 1, 3)
+                # Each prefix that cuts a tag/offset must fail explicitly.
+                for cut in range(width + 1):
+                    var truncated = block[: len(block) - cut - 1]
+                    with assert_raises():
+                        _ = decode_snappy(
+                            List[UInt8](truncated), len(expected), 3
+                        )
+
+
+def test_decoder_copy_capacity_transitions() raises:
+    # Exercise exact reserved boundaries independently of List growth policy.
+    for offset in [1, 2, 3, 4, 7, 8, 15, 16, 17, 31, 32, 33]:
+        for count in range(1, 65):
+            for spare in [0, count - 1, count, count + 1]:
+                var output = List[UInt8](capacity=offset + spare)
+                assert_equal(output.capacity(), offset + spare)
+                for i in range(offset):
+                    output.append(UInt8(i))
+                _copy(output, offset, count)
+                assert_equal(len(output), offset + count)
+                for i in range(len(output)):
+                    assert_equal(output[i], UInt8(i % offset))
+
+
+def test_decoder_literal_width_boundaries() raises:
+    for count in [
+        1,
+        4,
+        15,
+        16,
+        17,
+        59,
+        60,
+        61,
+        255,
+        256,
+        257,
+        65535,
+        65536,
+        65537,
+    ]:
+        for width in range(1, 5):
+            if (count - 1) >> (8 * width) != 0:
+                continue
+            var block = List[UInt8]()
+            _append_varint(block, count)
+            block.append(UInt8((59 + width) << 2))
+            var header_size = len(block)
+            for i in range(width):
+                block.append(UInt8(((count - 1) >> (8 * i)) & 255))
+            # Width checks must precede loads, including zero-byte availability.
+            for available in range(width):
+                var truncated = List[UInt8](block[: header_size + available])
+                with assert_raises():
+                    _ = decode_snappy(truncated, count)
+            for i in range(count):
+                block.append(UInt8(i & 255))
+            var decoded = decode_snappy(block, count)
+            for i in range(count):
+                assert_equal(decoded[i], UInt8(i & 255))
 
 
 def main() raises:

@@ -11,14 +11,67 @@ from std.bit import byte_swap
 from std.sys.info import is_big_endian
 
 
-def _read_le(data: List[UInt8], mut cursor: Int, count: Int) raises -> Int:
+@always_inline
+def _read_le[count: Int](data: List[UInt8], mut cursor: Int) raises -> Int:
+    """Read 1..4 bytes with one shared truncation check before fixed accesses.
+
+    Internal callers maintain 0 <= cursor <= len(data); no padding is read.
+    """
+    comptime assert 1 <= count <= 4
     if count > len(data) - cursor:
         raise Error("Truncated Snappy block")
     var value = UInt64(0)
-    for i in range(count):
+    comptime for i in range(count):
         value |= UInt64(data[cursor + i]) << UInt64(8 * i)
     cursor += count
     return Int(value)
+
+
+@always_inline
+def _copy(mut result: List[UInt8], offset: Int, var count: Int):
+    """Append a validated backreference, including bytes produced by this copy.
+
+    Caller proves 0 < offset <= len(result), 1 <= count <= 64, and
+    len(result) + count <= expected_size. Reserve only this validated command.
+    A width-W load requires offset >= W and count >= W: its source ends at
+    or before the current initialized length. Each extend initializes the next
+    W bytes before a later load can reference them. Only SIMD values, never
+    pointers, survive an extend; all writes fit the reserved end.
+    """
+    if count >= 16 and offset == 1:
+        var end = len(result) + count
+        if end > result.capacity():
+            result.reserve(max(end, 2 * result.capacity()))
+        var byte = result[len(result) - 1]
+        result.resize(end, fill=byte)
+        return
+    if count >= 4 and offset >= 4:
+        var end = len(result) + count
+        if end > result.capacity():
+            result.reserve(max(end, 2 * result.capacity()))
+        # Keep the long-copy path, then handle short copies and vector tails.
+        if offset >= 16:
+            while count >= 16:
+                var bytes = (
+                    result.unsafe_ptr()
+                    .unsafe_offset(len(result) - offset)
+                    .unsafe_load[width=16]()
+                )
+                result.extend(bytes)
+                count -= 16
+        while count >= 4:
+            var bytes = (
+                result.unsafe_ptr()
+                .unsafe_offset(len(result) - offset)
+                .unsafe_load[width=4]()
+            )
+            result.extend(bytes)
+            count -= 4
+    # Offsets 1..3 and final tails use forward byte copies. In particular, a
+    # small repeating pattern must grow before its new bytes can be read.
+    for _ in range(count):
+        var byte = result[len(result) - offset]
+        result.append(byte)
 
 
 def decode_snappy(
@@ -34,7 +87,7 @@ def decode_snappy(
     var declared = UInt64(0)
     var terminated = False
     for i in range(5):
-        var byte = _read_le(data, cursor, 1)
+        var byte = _read_le[1](data, cursor)
         if i == 4 and byte > 15:
             raise Error("Snappy length overflow")
         declared |= UInt64(byte & 127) << UInt64(7 * i)
@@ -47,12 +100,19 @@ def decode_snappy(
     # Grow only from validated commands; a malicious preamble cannot itself
     # trigger a huge allocation. Each append is bounded by expected_size.
     while cursor < len(data):
-        var tag = _read_le(data, cursor, 1)
+        var tag = _read_le[1](data, cursor)
         var kind = tag & 3
         var count = (tag >> 2) + 1
         if kind == 0:
             if count > 60:
-                count = _read_le(data, cursor, count - 60) + 1
+                if count == 61:
+                    count = _read_le[1](data, cursor) + 1
+                elif count == 62:
+                    count = _read_le[2](data, cursor) + 1
+                elif count == 63:
+                    count = _read_le[3](data, cursor) + 1
+                else:
+                    count = _read_le[4](data, cursor) + 1
             if count > len(data) - cursor or count > expected_size - len(
                 result
             ):
@@ -63,34 +123,16 @@ def decode_snappy(
             var offset: Int
             if kind == 1:
                 count = 4 + ((tag >> 2) & 7)
-                offset = ((tag & 224) << 3) | _read_le(data, cursor, 1)
+                offset = ((tag & 224) << 3) | _read_le[1](data, cursor)
             else:
-                offset = _read_le(data, cursor, 2 if kind == 2 else 4)
+                offset = _read_le[2](data, cursor) if kind == 2 else _read_le[
+                    4
+                ](data, cursor)
             if offset <= 0 or offset > len(result):
                 raise Error("Invalid Snappy copy offset")
             if count > expected_size - len(result):
                 raise Error("Snappy copy exceeds output")
-            if count >= 16 and (offset == 1 or offset >= 16):
-                var end = len(result) + count
-                if end > result.capacity():
-                    result.reserve(max(end, 2 * result.capacity()))
-                if offset == 1:
-                    var byte = result[len(result) - 1]
-                    result.resize(end, fill=byte)
-                    continue
-                # Each vector reads only initialized bytes. Later vectors
-                # may reference bytes appended by an earlier vector.
-                while count >= 16:
-                    var bytes = (
-                        result.unsafe_ptr()
-                        .unsafe_offset(len(result) - offset)
-                        .unsafe_load[width=16]()
-                    )
-                    result.extend(bytes)
-                    count -= 16
-            for _ in range(count):
-                var byte = result[len(result) - offset]
-                result.append(byte)
+            _copy(result, offset, count)
     if len(result) != expected_size:
         raise Error("Snappy decoded length mismatch")
     return result^

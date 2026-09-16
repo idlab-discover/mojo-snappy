@@ -35,7 +35,10 @@ The public functions borrow `List[UInt8]` inputs and return owned byte lists:
 - `snappy_max_compressed_length(size)` supplies a conservative encoded-size bound
   for input lengths from zero through `2**32 - 1`.
 
-The decoder handles all copy forms and overlapping backreferences. The encoder
+The decoder handles all copy forms and overlapping backreferences. Fixed-width
+reads check truncation before accessing bytes. Backreferences use bounded 16-byte
+and 4-byte copies where the source is initialized, with forward byte copies for
+small overlapping patterns and tails. No input padding is required. The encoder
 uses a power-of-two hash table sized to the source suffix (256–16,384 `Int`
 entries), greedy matching and two-byte-offset copies. Inputs shorter than four
 bytes allocate no hash table. Hash reads and initial match comparisons use guarded,
