@@ -52,8 +52,7 @@ def decode_snappy(
                 result
             ):
                 raise Error("Snappy literal exceeds input or output")
-            for i in range(count):
-                result.append(data[cursor + i])
+            result.extend(data[cursor : cursor + count])
             cursor += count
         else:
             var offset: Int
@@ -66,6 +65,24 @@ def decode_snappy(
                 raise Error("Invalid Snappy copy offset")
             if count > expected_size - len(result):
                 raise Error("Snappy copy exceeds output")
+            if count >= 16 and (offset == 1 or offset >= 16):
+                var end = len(result) + count
+                if end > result.capacity():
+                    result.reserve(max(end, 2 * result.capacity()))
+                if offset == 1:
+                    var byte = result[len(result) - 1]
+                    result.resize(end, fill=byte)
+                    continue
+                # Each vector reads only initialized bytes. Later vectors
+                # may reference bytes appended by an earlier vector.
+                while count >= 16:
+                    var bytes = (
+                        result.unsafe_ptr()
+                        .unsafe_offset(len(result) - offset)
+                        .unsafe_load[width=16]()
+                    )
+                    result.extend(bytes)
+                    count -= 16
             for _ in range(count):
                 var byte = result[len(result) - offset]
                 result.append(byte)
@@ -101,8 +118,7 @@ def _literal(
             _put(output, value >> (8 * i), limit)
     if count > limit - len(output):
         raise Error("Snappy encoded output exceeds limit")
-    for i in range(count):
-        output.append(data[start + i])
+    output.extend(data[start : start + count])
 
 
 def _hash4(data: List[UInt8], pos: Int) -> Int:
@@ -153,6 +169,23 @@ def encode_snappy(
             data, literal_start, pos - literal_start, output, max_output_bytes
         )
         var count = 4
+        # Both loads stay within the source, including overlapping matches.
+        # Fall back to byte comparisons at the first unequal vector or tail.
+        comptime width = 16
+        while pos + count + width <= len(data):
+            var current = (
+                data.unsafe_ptr()
+                .unsafe_offset(pos + count)
+                .unsafe_load[width=width]()
+            )
+            var previous = (
+                data.unsafe_ptr()
+                .unsafe_offset(candidate + count)
+                .unsafe_load[width=width]()
+            )
+            if current != previous:
+                break
+            count += width
         while (
             pos + count < len(data)
             and data[candidate + count] == data[pos + count]
