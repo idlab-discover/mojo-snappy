@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: prefix-dev/setup-pixi@d3f436a425481402e6a95a1d1fc10331c708cd9e # v0.10.2
+        with:
+          pixi-version: v0.80.0
+          environments: default oracle
+          locked: true
+      - name: Source, optimized, package and example checks
+        run: pixi run --locked check
+      - name: PyArrow and cramjam interoperability in both assertion modes
+        run: |
+          pixi run --locked -e oracle test-interop --assertions all
+          pixi run --locked -e oracle test-interop --assertions none
+
+  package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: prefix-dev/setup-pixi@d3f436a425481402e6a95a1d1fc10331c708cd9e # v0.10.2
+        with:
+          pixi-version: v0.80.0
+          environments: packaging
+          locked: true
+      - name: Build Conda package and test an isolated installation
+        run: pixi run --locked -e packaging conda-build
+      - name: Record package checksums and source revision
+        shell: bash
+        run: |
+          cd build/conda/linux-64
+          sha256sum ./*.conda > SHA256SUMS
+          git rev-parse HEAD > SOURCE_COMMIT
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: mojo-snappy-conda-linux-64
+          path: |
+            build/conda/linux-64/*.conda
+            build/conda/linux-64/SHA256SUMS
+            build/conda/linux-64/SOURCE_COMMIT
+          if-no-files-found: error

@@ -1,0 +1,58 @@
+context:
+  version: "0.1.0"
+
+package:
+  name: mojo-snappy
+  version: ${{ version }}
+
+# Build this checkout; registry submissions should pin the release commit.
+source:
+  path: ..
+  filter:
+    - src/**
+    - tests/test_snappy.mojo
+    - examples/roundtrip.mojo
+    - LICENSE
+    - THIRD_PARTY_NOTICES.md
+    - README.md
+
+build:
+  # Build 0 was used by pre-release pixi-build-mojo artifacts.
+  number: 1
+  skip: not linux or not x86_64
+  files:
+    - lib/mojo/mojo_snappy.mojoc
+  script:
+    - mkdir -p "$PREFIX/lib/mojo"
+    - mojo precompile src/mojo_snappy -o "$PREFIX/lib/mojo/mojo_snappy.mojoc"
+
+requirements:
+  build:
+    - mojo-compiler ==1.0.0
+  host:
+    - mojo-compiler ==1.0.0
+  run:
+    - mojo-compiler ==1.0.0
+
+tests:
+  - script:
+      # No checkout source include: imports must resolve to the installed package.
+      - mojo build -O3 -D ASSERT=all tests/test_snappy.mojo -o test-all
+      - ./test-all
+      - mojo build -O3 -D ASSERT=none tests/test_snappy.mojo -o test-none
+      - ./test-none
+      - mojo run examples/roundtrip.mojo
+    requirements:
+      run:
+        - gcc_linux-64
+    files:
+      source:
+        - tests/test_snappy.mojo
+        - examples/roundtrip.mojo
+
+about:
+  summary: Raw Snappy block compression and decompression in Mojo
+  license: Apache-2.0 AND BSD-3-Clause
+  license_file:
+    - LICENSE
+    - THIRD_PARTY_NOTICES.md

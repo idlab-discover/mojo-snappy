@@ -121,25 +121,31 @@ flags with benchmarks; comparisons with native Snappy built with `-DNDEBUG`
 should show both Mojo configurations. Codec algorithms and compressed sizes do
 not change with this policy.
 
-## Packaging and future distribution
+## Packaging and distribution
 
-The manifest defines a `pixi-build-mojo` package that creates a Conda artifact and
-installs `mojo_snappy.mojoc` under `lib/mojo`. Build, host and consumer compiler
-requirements are pinned to `1.0.0`; precompiled Mojo packages are compiler-specific.
-The Pixi build feature is currently a preview feature.
+The existing `pixi-build-mojo` manifest supports local Pixi path dependencies.
+For release artifacts, use the explicit Conda recipe, which also tests an isolated
+installation and includes the project license and upstream notices:
 
-`pixi build --output-dir build/dist` creates a local `.conda` artifact (Pixi 0.80
-also offers `pixi publish --path . --target-dir build/dist` as its replacement).
-No registry publication is configured. Before public release, choose a license,
-set the actual repository URL and release provenance, and verify name availability
-in the target registry/channel. No license has been selected by this extraction.
+```sh
+pixi run --locked -e packaging conda-build
+```
 
-Conda distributions can be hosted on prefix.dev or anaconda.org using the same
-`mojo-snappy` name. PyPI permits that name too, but publishing there would require
-a separate Python distribution layout/build configuration; a `.conda` artifact
-cannot be uploaded as a wheel. This project does not currently expose a Python API
-or build a wheel. PyPI normalizes `mojo-snappy`, `mojo_snappy` and `mojo.snappy` to
-the same distribution name; that does not rename the Mojo import.
+Artifacts are written to `build/conda/linux-64/`. The package installs
+`mojo_snappy.mojoc` under `lib/mojo` and pins the compiler to `1.0.0`.
+The initial supported build/test target is Linux x86-64. No package channel has
+been configured or publication claimed; there is no Python API or wheel.
+
+GitHub CI runs the source/package checks, both oracle assertion modes and the
+isolated Conda installation tests. It uploads the package, SHA256 checksums and
+checkout commit as CI artifacts. See [distribution and tagging](docs/distribution.md)
+and the [0.1.0 release candidate notes](docs/release-0.1.0.md).
+
+## License
+
+This project is licensed under [Apache-2.0](LICENSE). Adapted Google Snappy ideas
+retain the BSD-3-Clause terms in [third-party notices](THIRD_PARTY_NOTICES.md);
+both documents are included in the release Conda package.
 
 References: [Mojo packaging](https://mojolang.org/docs/tools/packaging/),
 [Mojo names](https://mojolang.org/docs/manual/packages/#package-naming-and-identifiers),
@@ -151,5 +157,6 @@ References: [Mojo packaging](https://mojolang.org/docs/tools/packaging/),
 ## Provenance
 
 Extracted from `pyroquet-next` commit `ef0206f`, originally introduced in
-`df3aa36`. The codec algorithm is unchanged by extraction. Codec unit and differential
+`df3aa36`. The initial extraction preserved the codec algorithm; subsequent commits added
+the bounded optimizations described above. Codec unit and differential
 tests moved with the library; Parquet page and reader-oracle tests remain in Pyroquet.
