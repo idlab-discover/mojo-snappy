@@ -51,6 +51,8 @@ tests:
         - examples/roundtrip.mojo
 
 about:
+  repository: https://github.com/idlab-discover/mojo-snappy
+  homepage: https://github.com/idlab-discover/mojo-snappy
   summary: Raw Snappy block compression and decompression in Mojo
   license: Apache-2.0 AND BSD-3-Clause
   license_file:

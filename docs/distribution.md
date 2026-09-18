@@ -26,18 +26,16 @@ Current local verification status is recorded in [release readiness](release-sta
 
 ## First release sequence
 
-The candidate version is 0.1.0. No repository destination was configured when
-these files were prepared. Once the owner supplies it:
+The candidate version is 0.1.0. The repository is
+[idlab-discover/mojo-snappy](https://github.com/idlab-discover/mojo-snappy); remote and package URL metadata are configured.
 
-1. Set the actual Git remote and repository/homepage metadata in `pixi.toml` and
-   `conda.recipe/recipe.yaml`. Do not tag a commit with placeholder destinations.
-2. Commit the reviewed license, CI, recipe, lockfile and release documentation.
+1. Commit the reviewed license, CI, recipe, lockfile and release documentation.
    Push the release branch and require both GitHub CI jobs to pass.
-3. Confirm workspace, package and recipe versions all equal 0.1.0 and review
+2. Confirm workspace, package and recipe versions all equal 0.1.0 and review
    [release notes](release-0.1.0.md). Tag that exact validated commit `v0.1.0`.
-4. Push the tag and wait for its CI run. Download its `mojo-snappy-conda-linux-64`
+3. Push the tag and wait for its CI run. Download its `mojo-snappy-conda-linux-64`
    artifact; check `SOURCE_COMMIT` against the tag and verify `SHA256SUMS`.
-5. Create a draft GitHub release for the existing tag with the release notes,
+4. Create a draft GitHub release for the existing tag with the release notes,
    `.conda` file, checksum file and source-commit record. Review and publish it.
 
 Do not move an existing release tag. A local package or CI artifact does not mean

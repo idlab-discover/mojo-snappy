@@ -5,6 +5,8 @@ Mojo 1.0.0. This is a preparation record, not a published-release announcement.
 
 Completed locally:
 
+- Repository destination and package metadata: [idlab-discover/mojo-snappy](https://github.com/idlab-discover/mojo-snappy).
+
 - Apache-2.0 license selection and preservation of Google Snappy notices.
 - GitHub CI configuration with pinned actions and locked Pixi environments.
 - Source, optimized, precompiled-package and example checks.
@@ -22,7 +24,6 @@ only that artifact is the current candidate.
 
 Remaining before the first release:
 
-- Supply the actual repository destination and set remote/package URL metadata.
 - Push the reviewed release-preparation commit and obtain a passing hosted CI run.
 - Tag the validated commit `v0.1.0`, then use its passing tag-build artifact for
   the GitHub release. No tag or publication has occurred yet.

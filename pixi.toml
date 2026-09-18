@@ -8,6 +8,8 @@ description = "Raw Snappy compression and decompression in Mojo"
 preview = ["pixi-build"]
 license = "Apache-2.0"
 license-file = "LICENSE"
+repository = "https://github.com/idlab-discover/mojo-snappy"
+homepage = "https://github.com/idlab-discover/mojo-snappy"
 
 [tasks]
 test = "mojo run -D ASSERT=all -I src tests/test_snappy.mojo"
@@ -27,6 +29,8 @@ mojo = "==1.0.0"
 name = "mojo-snappy"
 version = "0.1.0"
 license = "Apache-2.0 AND BSD-3-Clause"
+repository = "https://github.com/idlab-discover/mojo-snappy"
+homepage = "https://github.com/idlab-discover/mojo-snappy"
 
 [package.build]
 backend = { name = "pixi-build-mojo", version = "0.*", channels = ["https://prefix.dev/pixi-build-backends", "conda-forge"] }
