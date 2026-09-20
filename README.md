@@ -1,5 +1,7 @@
 # mojo-snappy
 
+![Mojo-snappy: a flame mascot jumping down a stack of columns](assets/branding/mojo-snappy-logo-169.png)
+
 Raw Snappy compression and decompression implemented in Mojo, pinned to **Mojo 1.0.0**.
 The library uses only the Mojo standard library. Python, PyArrow and cramjam are
 optional development oracles; they are not library runtime dependencies.
@@ -160,3 +162,7 @@ Extracted from `pyroquet-next` commit `ef0206f`, originally introduced in
 `df3aa36`. The initial extraction preserved the codec algorithm; subsequent commits added
 the bounded optimizations described above. Codec unit and differential
 tests moved with the library; Parquet page and reader-oracle tests remain in Pyroquet.
+
+<p align="center">
+  <img src="assets/branding/mojo-snappy-logo-square.png" alt="Mojo-snappy mascot" width="160">
+</p>
