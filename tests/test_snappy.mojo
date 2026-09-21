@@ -386,6 +386,48 @@ def test_decoder_copy_widths_and_tails() raises:
                         )
 
 
+def test_four_byte_copy_chains_and_late_failure() raises:
+    # Repeated exact copies cross allocation boundaries and must only read the
+    # decoded prefix, even with caller storage filled with unrelated bytes.
+    for kind in [1, 2, 3]:
+        for offset in [1, 2, 3, 4, 5, 15, 16]:
+            var size = offset + 4 * 17
+            var block: List[UInt8] = [231, 232]
+            _append_varint(block, size)
+            block.append(UInt8((offset - 1) << 2))
+            var expected = List[UInt8]()
+            for i in range(offset):
+                block.append(UInt8(65 + i))
+                expected.append(UInt8(65 + i))
+            for _ in range(17):
+                block.append(UInt8(1 if kind == 1 else 12 | kind))
+                block.append(UInt8(offset))
+                for _ in range(0 if kind == 1 else (1 if kind == 2 else 3)):
+                    block.append(0)
+                for _ in range(4):
+                    expected.append(expected[len(expected) - offset])
+            assert_equal(decode_snappy(block, size, 2), expected)
+            var destination = List[UInt8](length=size + 8, fill=179)
+            assert_equal(
+                decode_snappy_into(block, destination, size, 2, 3), size
+            )
+            for i in range(size):
+                assert_equal(destination[3 + i], expected[i])
+            var before = destination.copy()
+            # A full copy after the advertised end must fail before any store.
+            block.append(1)
+            block.append(1)
+            with assert_raises():
+                _ = decode_snappy_into(block, destination, size, 2, 3)
+            assert_equal(destination, before)
+            with assert_raises():
+                _ = decode_snappy(block, size, 2)
+            for i in range(3):
+                assert_equal(destination[i], UInt8(179))
+            for i in range(3 + size, len(destination)):
+                assert_equal(destination[i], UInt8(179))
+
+
 def test_decoder_copy_capacity_transitions() raises:
     # Exercise exact reserved boundaries independently of List growth policy.
     for offset in [

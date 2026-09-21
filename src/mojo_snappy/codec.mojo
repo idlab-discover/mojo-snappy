@@ -114,6 +114,15 @@ def _copy(mut result: List[UInt8], offset: Int, var count: Int):
         var end = len(result) + count
         if end > result.capacity():
             result.reserve(max(end, 2 * result.capacity()))
+        if count == 4:
+            # Exact source and destination widths; offsets 1..3 use forward copies.
+            var bytes = (
+                result.unsafe_ptr()
+                .unsafe_offset(len(result) - offset)
+                .unsafe_load[width=4]()
+            )
+            result.extend(bytes)
+            return
         # Keep the long-copy path, then handle short copies and vector tails.
         if offset >= 16:
             while count >= 16:
@@ -601,6 +610,15 @@ def _copy_into(
         _store_into(result, written, SIMD[DType.uint8, 64](byte), count)
         return
     if count >= 4 and offset >= 4:
+        if count == 4:
+            # Exact source and destination widths; offsets 1..3 use forward copies.
+            var bytes = (
+                result.unsafe_ptr()
+                .unsafe_offset(written - offset)
+                .unsafe_load[width=4]()
+            )
+            _store_into(result, written, bytes, 4)
+            return
         # Keep the long-copy path, then handle short copies and vector tails.
         if offset >= 16:
             while count >= 16:
