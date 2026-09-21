@@ -461,6 +461,64 @@ def encode_snappy(
     return _encode_snappy[False](data, max_output_bytes, start)
 
 
+def compress(
+    data: List[UInt8],
+    *,
+    max_output_bytes: Optional[Int] = None,
+    start: Int = 0,
+) raises -> List[UInt8]:
+    """Compress data[start:], computing a sufficient output limit by default.
+
+    Supply max_output_bytes to enforce a tighter encoded byte-length budget.
+    The limit is not an allocation or RSS bound.
+    """
+    if start < 0 or start > len(data):
+        raise Error("Invalid Snappy source start")
+    var limit = snappy_max_compressed_length(len(data) - start)
+    if max_output_bytes:
+        limit = max_output_bytes.value()
+    return encode_snappy(data, limit, start)
+
+
+def uncompressed_length(data: List[UInt8], start: Int = 0) raises -> Int:
+    """Read the UInt32 output size advertised by the header at start.
+
+    Validate only the header, not the remaining block. No output is allocated.
+    A returned size is not evidence that the block is valid or safe to allocate.
+    """
+    if start < 0 or start > len(data):
+        raise Error("Invalid Snappy source start")
+    var cursor = start
+    var declared = UInt64(0)
+    for i in range(5):
+        var byte = _read_le[1](data, cursor)
+        if i == 4 and byte > 15:
+            raise Error("Snappy length overflow")
+        declared |= UInt64(byte & 127) << UInt64(7 * i)
+        if byte < 128:
+            return Int(declared)
+    raise Error("Snappy length overflow")
+
+
+def decompress(
+    data: List[UInt8], *, max_output_bytes: Int, start: Int = 0
+) raises -> List[UInt8]:
+    """Decode data[start:] when its exact size is unknown but bounded.
+
+    max_output_bytes must be nonnegative and limits decoded byte length, not
+    allocation capacity or RSS. Reject an advertised size above this limit
+    before decoding. Then validate the complete block with ordinary bounded
+    output growth; the header alone never causes an output allocation.
+    Use decode_snappy instead when an independent exact size is known.
+    """
+    if max_output_bytes < 0:
+        raise Error("Invalid Snappy output limit")
+    var expected_size = uncompressed_length(data, start)
+    if expected_size > max_output_bytes:
+        raise Error("Snappy decoded output exceeds limit")
+    return decode_snappy(data, expected_size, start)
+
+
 @always_inline
 def _store_into[
     width: SIMDLength

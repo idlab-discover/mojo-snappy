@@ -14,7 +14,7 @@ import pyarrow as pa
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "build/snappy-interop"
 HARNESS = '''from std.sys import argv
-from mojo_snappy import encode_snappy, decode_snappy, decode_snappy_into
+from mojo_snappy import encode_snappy, decode_snappy, decode_snappy_into, compress, decompress, uncompressed_length
 
 def main() raises:
     var args = argv()
@@ -24,9 +24,13 @@ def main() raises:
     var data = source.read_bytes(size)
     var result: List[UInt8]
     if args[1] == "encode":
-        result = encode_snappy(data, 32 + size + size // 6)
+        result = compress(data)
+        if result != encode_snappy(data, 32 + size + size // 6):
+            raise Error("compress changed encoded bytes")
     else:
-        result = decode_snappy(data, Int(args[4]))
+        result = decompress(data, max_output_bytes=Int(args[4]))
+        if uncompressed_length(data) != Int(args[4]) or result != decode_snappy(data, Int(args[4])):
+            raise Error("decompress disagrees with exact-size decoder")
         var destination = List[UInt8](length=len(result) + 10, fill=179)
         if decode_snappy_into(data, destination, len(result), 0, 5) != len(result):
             raise Error("decode-into length mismatch")

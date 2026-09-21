@@ -1,6 +1,9 @@
 """Raw Snappy format, malformed-stream and bounded encoder tests."""
 from std.testing import assert_equal, assert_true, assert_raises, TestSuite
 from mojo_snappy import (
+    compress,
+    decompress,
+    uncompressed_length,
     encode_snappy,
     decode_snappy,
     decode_snappy_into,
@@ -637,6 +640,105 @@ def test_into_headers_literals_and_trailing_commands() raises:
         assert_equal(destination, expected)
         for cut in range(len(block)):
             _assert_into_rejects(List[UInt8](block[:cut]), 1)
+
+
+def test_convenience_roundtrips_and_budgets() raises:
+    for start in range(4):
+        for size in [0, 1, 3, 4, 60, 128, 256, 16384, 65536]:
+            var data = List[UInt8](length=start, fill=179)
+            for i in range(size):
+                data.append(UInt8(i % 251))
+            var packed = compress(data, start=start)
+            assert_equal(
+                packed,
+                encode_snappy(data, snappy_max_compressed_length(size), start),
+            )
+            assert_equal(
+                compress(data, max_output_bytes=len(packed), start=start),
+                packed,
+            )
+            with assert_raises():
+                _ = compress(
+                    data, max_output_bytes=len(packed) - 1, start=start
+                )
+            var framed: List[UInt8] = [99, 98, 97]
+            framed.extend(packed[:])
+            assert_equal(uncompressed_length(framed, 3), size)
+            var expected = List[UInt8](data[start:])
+            assert_equal(
+                decompress(framed, max_output_bytes=size, start=3), expected
+            )
+            assert_equal(
+                decompress(framed, max_output_bytes=size + 10, start=3),
+                expected,
+            )
+            if size:
+                with assert_raises():
+                    _ = decompress(framed, max_output_bytes=size - 1, start=3)
+    var empty = List[UInt8]()
+    with assert_raises():
+        _ = compress(empty, max_output_bytes=0)
+    with assert_raises():
+        _ = compress(empty, max_output_bytes=-1)
+    var zero: List[UInt8] = [0]
+    with assert_raises():
+        _ = decompress(zero, max_output_bytes=-1)
+    for start in [-1, 2]:
+        with assert_raises():
+            _ = compress(zero, start=start)
+        with assert_raises():
+            _ = decompress(zero, max_output_bytes=1, start=start)
+        with assert_raises():
+            _ = uncompressed_length(zero, start)
+
+
+def test_uncompressed_length_header_only() raises:
+    for size in [0, 1, 127, 128, 16383, 16384, 0x0FFFFFFF, 0xFFFFFFFF]:
+        var header = List[UInt8]()
+        _append_varint(header, size)
+        assert_equal(uncompressed_length(header), size)
+        for cut in range(len(header)):
+            with assert_raises():
+                _ = uncompressed_length(List[UInt8](header[:cut]))
+        if size:
+            # A valid header does not validate the block or allocate its size.
+            with assert_raises():
+                _ = decompress(header, max_output_bytes=0x100000000)
+        header.append(255)
+        assert_equal(uncompressed_length(header), size)
+    var noncanonical: List[UInt8] = [128, 128, 128, 128, 0]
+    assert_equal(uncompressed_length(noncanonical), 0)
+    assert_equal(decompress(noncanonical, max_output_bytes=0), List[UInt8]())
+    for last in [16, 128, 255]:
+        var overflow: List[UInt8] = [255, 255, 255, 255, UInt8(last)]
+        with assert_raises():
+            _ = uncompressed_length(overflow)
+        with assert_raises():
+            _ = decompress(overflow, max_output_bytes=0x100000000)
+
+
+def test_decompress_validates_entire_block() raises:
+    var good: List[UInt8] = [5, 0, 120, 14, 1, 0]
+    for cut in range(len(good)):
+        with assert_raises():
+            _ = decompress(List[UInt8](good[:cut]), max_output_bytes=100)
+    for offset in [0, 2]:
+        var bad = good.copy()
+        bad[4] = UInt8(offset)
+        with assert_raises():
+            _ = decompress(bad, max_output_bytes=100)
+    for declared in [4, 6]:
+        var bad = good.copy()
+        bad[0] = UInt8(declared)
+        with assert_raises():
+            _ = decompress(bad, max_output_bytes=100)
+    good.append(0)
+    good.append(42)
+    with assert_raises():
+        _ = decompress(good, max_output_bytes=100)
+    var literal_overflow: List[UInt8] = [1, 252, 255, 255, 255, 255]
+    with assert_raises():
+        _ = decompress(literal_overflow, max_output_bytes=100)
 
 
 def main() raises:

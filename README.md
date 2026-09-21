@@ -20,14 +20,29 @@ belongs to downstream consumers such as Pyroquet.
 ## Use
 
 ```mojo
-from mojo_snappy import encode_snappy, decode_snappy, snappy_max_compressed_length
+from mojo_snappy import compress, decompress
 
 var data = List[UInt8](length=1000, fill=42)
-var encoded = encode_snappy(data, snappy_max_compressed_length(len(data)))
-var decoded = decode_snappy(encoded, len(data))
+var encoded = compress(data)
+var decoded = decompress(encoded, max_output_bytes=4096)
 ```
 
-The public functions borrow `List[UInt8]` inputs:
+The public functions borrow `List[UInt8]` inputs. For ordinary use:
+
+- `compress(data, *, max_output_bytes=None, start=0)` encodes the source suffix.
+  By default it computes a sufficient encoded-size bound; supply a tighter
+  `max_output_bytes` to enforce your own budget. Output bytes match `encode_snappy`.
+- `decompress(data, *, max_output_bytes, start=0)` decodes a raw block when its
+  exact output size is unknown. The required, nonnegative cap limits decoded byte
+  length. The advertised size must fit the cap, and the entire block must validate.
+  It grows output only from validated commands, without preallocating the header size.
+- `uncompressed_length(data, start=0)` returns the UInt32 size advertised by the
+  header, without allocating output. It rejects truncated or overflowing headers,
+  but **does not validate the remaining block**. Apply your own size budget before
+  using this value to allocate storage.
+
+For exact-size validation and caller-owned storage, the existing functions remain
+available with unchanged arguments:
 
 - `encode_snappy(data, max_output_bytes, start=0)` encodes the source suffix and
   raises if encoded output would exceed the supplied byte-length limit.
@@ -57,9 +72,11 @@ Input and destination must be distinct Lists. Reuse the buffer after consumers h
 finished with its previous contents. For a prefixed final buffer, pass its prefix
 length as `destination_start`; `start` independently selects the compressed suffix.
 
-`encode_snappy` and `decode_snappy` return newly owned Lists. Use `decode_snappy`
-when the decoder should manage output allocation; it grows only after validating
-commands, so a header alone cannot trigger a large allocation. Caller-owned decoding
+`compress`, `decompress`, `encode_snappy` and `decode_snappy` return newly owned
+Lists. Use `decode_snappy` when independent metadata supplies the exact output size;
+unlike a maximum, this also rejects blocks whose decoded size is smaller than expected.
+Both allocating decoders grow only after validating commands, so a header alone
+cannot trigger a large allocation. Caller-owned decoding
 requires the caller to choose and allocate an acceptable output size in advance.
 Both decoders support all Snappy copy forms and overlapping backreferences and
 require no input padding.
