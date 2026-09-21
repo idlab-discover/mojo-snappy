@@ -8,6 +8,7 @@ No framing, Python, or external codec library is involved.
 
 
 from std.bit import byte_swap, count_trailing_zeros
+from std.memory import unsafe_memcpy
 from std.sys.info import is_big_endian
 
 
@@ -458,3 +459,202 @@ def encode_snappy(
     if len(data) - start >= 16384:
         return _encode_snappy[True](data, max_output_bytes, start)
     return _encode_snappy[False](data, max_output_bytes, start)
+
+
+@always_inline
+def _store_into[
+    width: SIMDLength
+](
+    mut output: List[UInt8],
+    mut written: Int,
+    value: SIMD[DType.uint8, width],
+    count: Int,
+):
+    # Parser proves 0 <= count <= width and written + count <= len(output).
+    # Full-width stores and scalar tails write exactly count initialized bytes.
+    if count == Int(width):
+        output.unsafe_ptr().unsafe_offset(written).unsafe_store(value)
+    else:
+        for i in range(count):
+            output[written + i] = value[i]
+    written += count
+
+
+@always_inline
+def _pattern_copy_into[
+    period: Int
+](mut result: List[UInt8], mut written: Int, var count: Int):
+    comptime assert 2 <= period < 16
+    comptime if period == 4:
+        var seed4 = (
+            result.unsafe_ptr()
+            .unsafe_offset(written - 4)
+            .unsafe_load[width=4]()
+        )
+        var eight = seed4.join(seed4)
+        var sixteen = eight.join(eight)
+        var wide = sixteen.join(sixteen)
+        if count == 64:
+            _store_into(result, written, wide.join(wide), 64)
+        else:
+            _store_into(result, written, wide.join(wide), count)
+        return
+    var seed = SIMD[DType.uint8, 16](0)
+    comptime for i in range(period):
+        seed[i] = result[written - period + i]
+    var pattern = SIMD[DType.uint8, 16](0)
+    comptime for i in range(16):
+        pattern[i] = seed[i % period]
+    while count >= 16:
+        _store_into(result, written, pattern, 16)
+        var next_pattern = SIMD[DType.uint8, 16](0)
+        comptime for i in range(16):
+            next_pattern[i] = pattern[(i + 16) % period]
+        pattern = next_pattern
+        count -= 16
+    if count:
+        _store_into(result, written, pattern, count)
+
+
+@no_inline
+def _expand_pattern_into(
+    mut result: List[UInt8], mut written: Int, offset: Int, count: Int
+):
+    comptime for period in range(2, 16):
+        if offset == period:
+            _pattern_copy_into[period](result, written, count)
+            return
+
+
+@always_inline
+def _copy_into(
+    mut result: List[UInt8], mut written: Int, offset: Int, var count: Int
+):
+    """Write a validated 1..64-byte copy within initialized List storage.
+
+    The parser proves offset fits the decoded prefix, not the destination's
+    preexisting prefix, and written + count <= len(result). A width-W load
+    requires offset >= W and count >= W. Stores are exact; later overlapping
+    reads only observe bytes already decoded. No pointer escapes or survives
+    a resize, and this path never changes the destination length.
+    """
+    if count >= 16 and offset == 1:
+        var byte = result[written - 1]
+        _store_into(result, written, SIMD[DType.uint8, 64](byte), count)
+        return
+    if count >= 4 and offset >= 4:
+        # Keep the long-copy path, then handle short copies and vector tails.
+        if offset >= 16:
+            while count >= 16:
+                var bytes = (
+                    result.unsafe_ptr()
+                    .unsafe_offset(written - offset)
+                    .unsafe_load[width=16]()
+                )
+                _store_into(result, written, bytes, Int(bytes.length))
+                count -= 16
+        elif count >= 16:
+            _expand_pattern_into(result, written, offset, count)
+            return
+        while count >= 4:
+            var bytes = (
+                result.unsafe_ptr()
+                .unsafe_offset(written - offset)
+                .unsafe_load[width=4]()
+            )
+            _store_into(result, written, bytes, Int(bytes.length))
+            count -= 4
+    if count >= 16:
+        # Only offsets two and three remain after the paths above.
+        _expand_pattern_into(result, written, offset, count)
+        return
+    # Short offsets 1..3 and final tails use forward byte copies; every source
+    # byte belongs to the decoded prefix before later iterations read it.
+    for _ in range(count):
+        var byte = result[written - offset]
+        result[written] = byte
+        written += 1
+
+
+def decode_snappy_into(
+    data: List[UInt8],
+    mut destination: List[UInt8],
+    expected_size: Int,
+    start: Int = 0,
+    destination_start: Int = 0,
+) raises -> Int:
+    """Decode data[start:] into initialized caller-owned List storage.
+
+    Return expected_size after exact header and output-size validation.
+    Write only destination[destination_start:destination_start+expected_size].
+    Destination length (not reserved capacity) must cover that range. Neither
+    list is resized; prefix and tail stay untouched, including on errors.
+    Late errors may leave a validated decoded prefix in the destination.
+    Input and destination are distinct owners with immutable/mutable borrows;
+    safe callers cannot pass the same List for both. No view escapes the call.
+    """
+    if expected_size < 0 or UInt64(expected_size) > UInt64(0xFFFFFFFF):
+        raise Error("Invalid Snappy expected size")
+    if start < 0 or start > len(data):
+        raise Error("Invalid Snappy source start")
+    if destination_start < 0 or destination_start > len(destination):
+        raise Error("Invalid Snappy destination start")
+    if expected_size > len(destination) - destination_start:
+        raise Error("Snappy destination too small")
+    var cursor = start
+    var declared = UInt64(0)
+    var terminated = False
+    for i in range(5):
+        var byte = _read_le[1](data, cursor)
+        if i == 4 and byte > 15:
+            raise Error("Snappy length overflow")
+        declared |= UInt64(byte & 127) << UInt64(7 * i)
+        if byte < 128:
+            terminated = True
+            break
+    if not terminated or declared != UInt64(expected_size):
+        raise Error("Snappy declared length mismatch")
+    var written = destination_start
+    while cursor < len(data):
+        var tag = _read_le[1](data, cursor)
+        var kind = tag & 3
+        var count = (tag >> 2) + 1
+        if kind == 0:
+            if count > 60:
+                if count == 61:
+                    count = _read_le[1](data, cursor) + 1
+                elif count == 62:
+                    count = _read_le[2](data, cursor) + 1
+                elif count == 63:
+                    count = _read_le[3](data, cursor) + 1
+                else:
+                    count = _read_le[4](data, cursor) + 1
+            if count > len(data) - cursor or count > expected_size - (
+                written - destination_start
+            ):
+                raise Error("Snappy literal exceeds input or output")
+            # Distinct List owners and exclusive output borrow ensure non-overlap.
+            unsafe_memcpy(
+                dest=destination.unsafe_ptr().unsafe_offset(written),
+                src=data.unsafe_ptr().unsafe_offset(cursor),
+                count=count,
+            )
+            written += count
+            cursor += count
+        else:
+            var offset: Int
+            if kind == 1:
+                count = 4 + ((tag >> 2) & 7)
+                offset = ((tag & 224) << 3) | _read_le[1](data, cursor)
+            else:
+                offset = _read_le[2](data, cursor) if kind == 2 else _read_le[
+                    4
+                ](data, cursor)
+            if offset <= 0 or offset > written - destination_start:
+                raise Error("Invalid Snappy copy offset")
+            if count > expected_size - (written - destination_start):
+                raise Error("Snappy copy exceeds output")
+            _copy_into(destination, written, offset, count)
+    if written - destination_start != expected_size:
+        raise Error("Snappy decoded length mismatch")
+    return written - destination_start

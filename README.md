@@ -27,18 +27,42 @@ var encoded = encode_snappy(data, snappy_max_compressed_length(len(data)))
 var decoded = decode_snappy(encoded, len(data))
 ```
 
-The public functions borrow `List[UInt8]` inputs and return owned byte lists:
+The public functions borrow `List[UInt8]` inputs:
 
 - `encode_snappy(data, max_output_bytes, start=0)` encodes the source suffix and
   raises if encoded output would exceed the supplied byte-length limit.
 - `decode_snappy(data, expected_size, start=0)` decodes a raw block from the suffix,
   requiring the declared and actual output lengths to equal `expected_size`.
   Invalid offsets, truncated commands, output overruns and trailing commands reject.
+- `decode_snappy_into(data, destination, expected_size, start=0, destination_start=0)`
+  decodes into an initialized, caller-owned List and returns `expected_size`.
+  It performs no output allocation or resizing, enabling buffer reuse and decoding
+  directly into a larger final buffer.
 - `snappy_max_compressed_length(size)` supplies a conservative encoded-size bound
   for input lengths from zero through `2**32 - 1`.
 
-The decoder supports all Snappy copy forms and overlapping backreferences,
-validates commands before growing output, and requires no input padding.
+For reusable storage:
+
+```mojo
+from mojo_snappy import decode_snappy_into
+
+var destination = List[UInt8](length=len(data), fill=0)
+_ = decode_snappy_into(encoded, destination, len(data))
+```
+
+`destination` must have enough **initialized length**, not just reserved capacity,
+for `destination_start + expected_size` bytes. Its prefix and tail remain untouched.
+Late errors may leave a partially decoded region; only consume it after success.
+Input and destination must be distinct Lists. Reuse the buffer after consumers have
+finished with its previous contents. For a prefixed final buffer, pass its prefix
+length as `destination_start`; `start` independently selects the compressed suffix.
+
+`encode_snappy` and `decode_snappy` return newly owned Lists. Use `decode_snappy`
+when the decoder should manage output allocation; it grows only after validating
+commands, so a header alone cannot trigger a large allocation. Caller-owned decoding
+requires the caller to choose and allocate an acceptable output size in advance.
+Both decoders support all Snappy copy forms and overlapping backreferences and
+require no input padding.
 The encoder uses an input-sized hash table, greedy matching and adaptive search
 skipping on inputs of at least 16 KiB. Speed and compression density vary by input;
 byte-length limits are not exact allocation or RSS limits.

@@ -14,7 +14,7 @@ import pyarrow as pa
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "build/snappy-interop"
 HARNESS = '''from std.sys import argv
-from mojo_snappy import encode_snappy, decode_snappy
+from mojo_snappy import encode_snappy, decode_snappy, decode_snappy_into
 
 def main() raises:
     var args = argv()
@@ -27,6 +27,15 @@ def main() raises:
         result = encode_snappy(data, 32 + size + size // 6)
     else:
         result = decode_snappy(data, Int(args[4]))
+        var destination = List[UInt8](length=len(result) + 10, fill=179)
+        if decode_snappy_into(data, destination, len(result), 0, 5) != len(result):
+            raise Error("decode-into length mismatch")
+        for i in range(len(result)):
+            if destination[5 + i] != result[i]:
+                raise Error("decode-into byte mismatch")
+        for i in range(5):
+            if destination[i] != 179 or destination[5 + len(result) + i] != 179:
+                raise Error("decode-into changed destination boundary")
     var output = open(args[3], "w")
     output.write_bytes(result)
 '''
