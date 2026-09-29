@@ -163,6 +163,29 @@ without core isolation; small differences should not be treated as decisive.
 Harnesses, hashes and raw samples are retained locally in the gitignored
 `build/three-way-20260930/` directory and are not distributed.
 
+### Real Parquet pages
+
+The synthetic inputs above are small or extreme. A second comparison uses
+**159 real Parquet pages** (144 MB decoded, median about 1 MB): a byte-weighted
+sample from a 25.3 GB collection of public network-security datasets, mostly
+FLOAT/DOUBLE/INT PLAIN data pages and RLE_DICTIONARY IDs. Decoding uses each
+page's original Snappy block as written by the dataset's producer; encoding
+compresses the decoded page. Same host and CPU pinning, five shuffled rounds,
+about 20 ms per sample; aggregate throughput is total bytes over the sum of
+per-page medians. Measured on 2026-09-30 at commit `a99946c`.
+
+| Operation | Mojo GB/s | Local Snappy GB/s | Distro Snappy GB/s | Mojo / Local time |
+|---|---:|---:|---:|---:|
+| encode | 0.95 | 0.99 | 0.76 | 1.03 |
+| decode (allocating) | 2.61 | 1.80 | 1.10 | 0.69 |
+| decode into reused buffer | 2.72 | 1.84 | 1.15 | 0.68 |
+
+Per page, Mojo decodes faster than local Snappy on all 159 pages (median time
+ratio 0.68). Encoding is at parity on the median page (ratio 1.01; 10th/90th
+percentiles 0.72/1.11). The largest remaining encode gap is a sequential INT64
+index page (about 1.24x). Compressed output is byte-identical to local Snappy
+on every page. The page corpus is not distributed with the repository.
+
 ## Develop and verify
 
 ```sh
