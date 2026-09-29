@@ -708,14 +708,47 @@ def _emit_copy(
     return _emit_copy_at_most_64(dst, op, offset, length)
 
 
-def _compress_fragment(
+@always_inline
+def _probe16(
+    src: Pointer[UInt8, _],
+    base: Int,
+    ip: Int,
+    table: Pointer[mut=True, UInt16, _],
+    mask: UInt32,
+    mut candidate: Int,
+) -> Int:
+    """Index and test positions ip..ip+15; return the first match or 16.
+
+    Requires ip + 24 <= the fragment end (loads reach ip + 16 + 8). Every probed position is
+    recorded in the table, as in Google Snappy's unrolled loop; a match at
+    i leaves candidate at its earlier occurrence. Fully unrolled.
+    """
+    var data = _ld64(src, ip)
+    comptime for j in range(4):
+        comptime for k in range(4):
+            comptime i = 4 * j + k
+            var word = UInt32(data)
+            var index = _table_index(word, mask)
+            var found = base + Int(table[unsafe_offset=index])
+            table[unsafe_offset=index] = UInt16(ip - base + i)
+            if _ld32(src, found) == word:
+                candidate = found
+                return i
+            data >>= 8
+        data = _ld64(src, ip + 4 * j + 4)
+    return 16
+
+
+def _compress_fragment[
+    table_size: Int
+](
     src: Pointer[UInt8, _],
     base: Int,
     size: Int,
     dst: Pointer[mut=True, UInt8, _],
     var op: Int,
     table: Pointer[mut=True, UInt16, _],
-    table_size: Int,
+    dynamic_table_size: Int,
 ) -> Int:
     """Compress src[base:base+size], size <= 64 KiB, starting at dst[op].
 
@@ -724,8 +757,15 @@ def _compress_fragment(
     zeroed entries; each stores a position relative to base, so candidates
     stay in [base, ip) and offsets below 65536. dst needs
     32 + size + size / 6 bytes from op. See THIRD_PARTY_NOTICES.md.
+
+    A nonzero table_size parameter fixes the table size at compile time
+    (full 64 KiB fragments); zero uses dynamic_table_size.
     """
-    var mask = UInt32(2 * (table_size - 1))
+    var mask: UInt32
+    comptime if table_size:
+        mask = UInt32(2 * (table_size - 1))
+    else:
+        mask = UInt32(2 * (dynamic_table_size - 1))
     var ip = base
     var ip_end = base + size
     if size >= _INPUT_MARGIN:
@@ -734,33 +774,26 @@ def _compress_fragment(
             # Bytes in [next_emit, ip) are pending literal bytes.
             var next_emit = ip
             ip += 1
-            var data = _ld64(src, ip)
+            # Little-endian bytes at ip; the match loop keeps it current.
+            var data = UInt64(0)
             var skip = UInt32(32)
             var candidate = base
             var matched_early = False
             if ip_limit - ip >= 16:
                 # Probe the next 16 positions densely before skipping.
-                var delta = ip - base
-                for i in range(16):
-                    var word = UInt32(data)
-                    var index = _table_index(word, mask)
-                    candidate = base + Int(table[unsafe_offset=index])
-                    table[unsafe_offset=index] = UInt16(delta + i)
-                    if _ld32(src, candidate) == word:
-                        # Literal of i + 1 <= 16 bytes, then the match.
-                        dst[unsafe_offset=op] = UInt8(i << 2)
-                        _copy16(dst, op + 1, src, next_emit)
-                        ip += i
-                        op += i + 2
-                        matched_early = True
-                        break
-                    data >>= 8
-                    if i % 4 == 3:
-                        data = _ld64(src, ip + i + 1)
+                var i = _probe16(src, base, ip, table, mask, candidate)
+                if i < 16:
+                    # Literal of i + 1 <= 16 bytes, then the match.
+                    dst[unsafe_offset=op] = UInt8(i << 2)
+                    _copy16(dst, op + 1, src, next_emit)
+                    ip += i
+                    op += i + 2
+                    matched_early = True
                 if not matched_early:
                     ip += 16
                     skip += 16
             if not matched_early:
+                data = _ld64(src, ip)
                 var found = False
                 while True:
                     var word = UInt32(data)
@@ -859,9 +892,14 @@ def encode_snappy(
             var fragment = min(end - pos, _BLOCK_SIZE)
             var table_size = _hash_table_size(fragment)
             unsafe_memset_zero(table.unsafe_ptr(), table_size)
-            op = _compress_fragment(
-                src, pos, fragment, dst, op, table.unsafe_ptr(), table_size
-            )
+            if table_size == _MAX_HASH_TABLE_SIZE:
+                op = _compress_fragment[_MAX_HASH_TABLE_SIZE](
+                    src, pos, fragment, dst, op, table.unsafe_ptr(), table_size
+                )
+            else:
+                op = _compress_fragment[0](
+                    src, pos, fragment, dst, op, table.unsafe_ptr(), table_size
+                )
             pos += fragment
     if op > max_output_bytes:
         raise Error("Snappy encoded output exceeds limit")
