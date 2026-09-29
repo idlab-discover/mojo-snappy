@@ -1,294 +1,50 @@
-"""Raw Snappy format, malformed-stream and bounded encoder tests."""
+"""Raw Snappy format, malformed-block, buffer-contract and parity tests."""
+from std.sys.info import CompilationTarget
 from std.testing import assert_equal, assert_true, assert_raises, TestSuite
 from mojo_snappy import (
     compress,
+    compress_into,
     decompress,
+    decompress_into,
+    max_compressed_length,
     uncompressed_length,
-    encode_snappy,
-    decode_snappy,
-    decode_snappy_into,
-    snappy_max_compressed_length,
 )
-from mojo_snappy.codec import _hash_table_size, _load4, _match_length
 
 
-def _assert_into_matches(data: List[UInt8], expected: List[UInt8]) raises:
-    var destination = List[UInt8](length=len(expected) + 10, fill=179)
-    assert_equal(
-        decode_snappy_into(data, destination, len(expected), 0, 5),
-        len(expected),
-    )
-    for i in range(len(expected)):
-        assert_equal(destination[5 + i], expected[i])
-    for i in range(5):
-        assert_equal(destination[i], UInt8(179))
-        assert_equal(destination[5 + len(expected) + i], UInt8(179))
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 
-def test_roundtrip_and_compression() raises:
-    for n in [0, 1, 3, 4, 59, 60, 61, 255, 256, 257, 65535, 65536, 100000]:
-        var data = List[UInt8]()
-        for i in range(n):
-            data.append(UInt8(i % 251))
-        var encoded = encode_snappy(data, n + n // 6 + 32)
-        assert_equal(decode_snappy(encoded, n), data)
-        var exact = encode_snappy(data, len(encoded))
-        assert_equal(exact, encoded)
-        with assert_raises():
-            _ = encode_snappy(data, len(encoded) - 1)
-        if n > 1000:
-            assert_true(len(encoded) < n // 2)
+comptime SENTINEL = UInt8(179)
 
 
-def test_copy_forms_and_overlap() raises:
-    # Literal 'x' then COPY_1, COPY_2, COPY_4, each with offset one.
-    for tag in [1, 14, 15]:
-        var encoded: List[UInt8] = [5, 0, 120]
-        encoded.append(UInt8(tag))
-        encoded.append(1)
-        if tag != 1:
-            encoded.append(0)
-        if tag == 15:
-            encoded.append(0)
-            encoded.append(0)
-        assert_equal(decode_snappy(encoded, 5), List[UInt8](length=5, fill=120))
-    # COPY_1's high offset bits: 300 literal bytes, then offset 300 length 4.
-    var block: List[UInt8] = [176, 2, 244, 43, 1]
-    for i in range(300):
-        block.append(UInt8(i & 255))
-    block.append(33)
-    block.append(44)
-    var decoded = decode_snappy(block, 304)
-    _assert_into_matches(block, decoded)
-    for i in range(304):
-        assert_equal(decoded[i], UInt8((i % 300) & 255))
+def _lcg_bytes(n: Int, seed: UInt32, bits: Int) -> List[UInt8]:
+    var state = seed
+    var out = List[UInt8](capacity=n)
+    for _ in range(n):
+        state = state * UInt32(1664525) + UInt32(1013904223)
+        out.append(UInt8((state >> 24) & UInt32((1 << bits) - 1)))
+    return out^
 
 
-def test_extended_literals_and_long_copy_offset() raises:
-    # Extended literal lengths are legal in each of the four widths.
-    for width in range(1, 5):
-        var block: List[UInt8] = [1, UInt8((59 + width) << 2), 0]
-        for _ in range(width - 1):
-            block.append(0)
-        block.append(42)
-        var expected: List[UInt8] = [42]
-        assert_equal(decode_snappy(block, 1), expected)
-        _assert_into_matches(block, expected)
-    # 65536 literal bytes then COPY_4 length four at distance 65536.
-    var block: List[UInt8] = [132, 128, 4, 244, 255, 255]
-    for i in range(65536):
-        block.append(UInt8(i & 255))
-    block.append(15)
-    block.append(0)
-    block.append(0)
-    block.append(1)
-    block.append(0)
-    var decoded = decode_snappy(block, 65540)
-    _assert_into_matches(block, decoded)
-    for i in range(65540):
-        assert_equal(decoded[i], UInt8(i & 255))
+def _numeric_page(values: Int, seed: UInt32) -> List[UInt8]:
+    """Little-endian UInt32 runs with noisy low bits, like a PLAIN page."""
+    var state = seed
+    var out = List[UInt8](capacity=4 * values)
+    for i in range(values):
+        state = state * UInt32(1664525) + UInt32(1013904223)
+        var value = UInt32((i // 3) * 7) + (state >> 29)
+        for k in range(4):
+            out.append(UInt8((value >> UInt32(8 * k)) & 255))
+    return out^
 
 
-def test_malformed_and_truncation() raises:
-    var good: List[UInt8] = [5, 0, 120, 14, 1, 0]
-    for n in range(len(good)):
-        var prefix = List[UInt8]()
-        for i in range(n):
-            prefix.append(good[i])
-        with assert_raises():
-            _ = decode_snappy(prefix, 5)
-    with assert_raises():
-        _ = decode_snappy(good, 4)
-    good.append(0)
-    good.append(1)
-    with assert_raises():
-        _ = decode_snappy(good, 5)
-    var zero_offset: List[UInt8] = [5, 0, 120, 14, 0, 0]
-    with assert_raises():
-        _ = decode_snappy(zero_offset, 5)
-    var past_start: List[UInt8] = [5, 0, 120, 14, 2, 0]
-    with assert_raises():
-        _ = decode_snappy(past_start, 5)
-    var overflow: List[UInt8] = [255, 255, 255, 255, 16]
-    with assert_raises():
-        _ = decode_snappy(overflow, 0)
-    var unterminated: List[UInt8] = [128, 128, 128, 128, 128]
-    with assert_raises():
-        _ = decode_snappy(unterminated, 0)
-    var oversized_literal: List[UInt8] = [1, 252, 255, 255, 255, 255]
-    with assert_raises():
-        _ = decode_snappy(oversized_literal, 1)
-    with assert_raises():
-        _ = decode_snappy(good, -1)
-    with assert_raises():
-        _ = encode_snappy(good, -1)
-
-
-def test_suffix_and_source_bounds() raises:
-    var data: List[UInt8] = [90, 91, 1, 2, 3, 1, 2, 3, 1, 2, 3]
-    var wanted: List[UInt8] = [1, 2, 3, 1, 2, 3, 1, 2, 3]
-    var encoded = encode_snappy(data, 100, 2)
-    var prefixed: List[UInt8] = [90, 91]
-    for byte in encoded:
-        prefixed.append(byte)
-    assert_equal(decode_snappy(prefixed, 9, 2), wanted)
-    assert_equal(
-        decode_snappy(encode_snappy(data, 1, len(data)), 0), List[UInt8]()
-    )
-    for start in [-1, len(data) + 1]:
-        with assert_raises():
-            _ = encode_snappy(data, 100, start)
-        with assert_raises():
-            _ = decode_snappy(data, 0, start)
-
-
-def test_compressed_length_bound() raises:
-    assert_equal(snappy_max_compressed_length(0), 32)
-    assert_equal(snappy_max_compressed_length(0xFFFFFFFF), 5010795209)
-    with assert_raises():
-        _ = snappy_max_compressed_length(-1)
-    with assert_raises():
-        _ = snappy_max_compressed_length(0x100000000)
-
-
-def test_validation_without_compiler_assertions() raises:
-    # These must raise explicit codec errors even under ASSERT=none.
-    var empty: List[UInt8] = [0]
-    with assert_raises():
-        _ = decode_snappy(empty, 0x100000000)
-    # A maximum advertised size must not allocate output before validation.
-    var huge: List[UInt8] = [255, 255, 255, 255, 15]
-    with assert_raises():
-        _ = decode_snappy(huge, 0xFFFFFFFF)
-    # Each copy form must reject every truncated offset, including COPY_4.
-    for kind in [1, 2, 3]:
-        var width = 1 if kind == 1 else (2 if kind == 2 else 4)
-        var tag = 1 if kind == 1 else (12 | kind)
-        for count in range(width):
-            var block: List[UInt8] = [5, 0, 120, UInt8(tag)]
-            for i in range(count):
-                block.append(UInt8(1 if i == 0 else 0))
-            with assert_raises():
-                _ = decode_snappy(block, 5)
-    # Four-byte literal lengths must not wrap at the UInt32 boundary.
-    for last in [254, 255]:
-        var block: List[UInt8] = [1, 252, UInt8(last), 255, 255, 255, 120]
-        with assert_raises():
-            _ = decode_snappy(block, 1)
-
-
-def test_hash_state_bounds_and_word_byte_order() raises:
-    assert_equal(_hash_table_size(0), 256)
-    for boundary in [256, 512, 1024, 2048, 4096, 8192, 16384, 32768]:
-        assert_equal(_hash_table_size(boundary - 1), boundary)
-        assert_equal(_hash_table_size(boundary), boundary)
-        assert_equal(_hash_table_size(boundary + 1), min(2 * boundary, 32768))
-    # Exercise arithmetic at the format limit without allocating that input.
-    assert_equal(_hash_table_size(0xFFFFFFFF), 32768)
-    for start in range(8):
-        var data = List[UInt8](length=start, fill=0)
-        data.append(0x01)
-        data.append(0x23)
-        data.append(0x45)
-        data.append(0xFE)
-        assert_equal(_load4(data, start), UInt32(0xFE452301))
-
-
-def test_encoder_word_tails_and_suffix_alignment() raises:
-    # Every alignment, four-byte boundary and SIMD tail; the last four bytes
-    # repeat an earlier word and can be a match at the final legal read.
-    for start in range(8):
-        for size in range(40):
-            var data = List[UInt8](length=start, fill=255)
-            var expected = List[UInt8]()
-            for i in range(size):
-                var byte = UInt8(i % 7)
-                expected.append(byte)
-                data.append(byte)
-            var encoded = encode_snappy(
-                data, snappy_max_compressed_length(size), start
-            )
-            assert_equal(decode_snappy(encoded, size), expected)
-            assert_equal(encode_snappy(data, len(encoded), start), encoded)
-            with assert_raises():
-                _ = encode_snappy(data, len(encoded) - 1, start)
-
-
-def test_encoder_table_transitions_and_collisions() raises:
-    for boundary in [16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]:
-        for delta in [-1, 0, 1]:
-            var size = boundary + delta
-            var expected = List[UInt8]()
-            var state = UInt32(932847)
-            # Repeated and distinct words share a bounded table. A hash hit
-            # alone must never emit a copy without comparing all four bytes.
-            for i in range(size):
-                state = state * UInt32(1664525) + UInt32(1013904223)
-                expected.append(UInt8((state >> 24) & 15))
-            for i in range(4):
-                expected[size - 4 + i] = expected[i]
-            var data: List[UInt8] = [99, 98, 97]
-            data.extend(expected.copy())
-            var encoded = encode_snappy(
-                data, snappy_max_compressed_length(size), 3
-            )
-            assert_equal(decode_snappy(encoded, size), expected)
-            assert_equal(encode_snappy(data, len(encoded), 3), encoded)
-            with assert_raises():
-                _ = encode_snappy(data, len(encoded) - 1, 3)
-
-
-def test_adaptive_search_recovery_and_literal_tails() raises:
-    # Long random runs must not prevent recovery when repetition resumes.
-    # Include stride transitions, suffix-relative 64K boundaries and every
-    # final literal tail. Compression checks allow changed match choices.
-    for prefix in [127, 128, 129, 1023, 65535, 65536, 65537, 262144]:
-        for tail in range(4):
-            var expected = List[UInt8]()
-            var state = UInt32(932847)
-            for _ in range(prefix):
-                state = state * UInt32(1664525) + UInt32(1013904223)
-                expected.append(UInt8(state >> 24))
-            for _ in range(256):
-                expected.append(42)
-            # Keep even the early transition cases on the adaptive large path.
-            var padding = max(0, 16384 - prefix - 256 - tail)
-            for _ in range(padding):
-                state = state * UInt32(1664525) + UInt32(1013904223)
-                expected.append(UInt8(state >> 24))
-            for i in range(tail):
-                expected.append(UInt8(200 + i))
-            var data: List[UInt8] = [90, 91, 92]
-            data.extend(expected.copy())
-            var encoded = encode_snappy(
-                data, snappy_max_compressed_length(len(expected)), 3
-            )
-            assert_equal(decode_snappy(encoded, len(expected)), expected)
-            # Two probes at most 16 bytes apart recover the constant island;
-            # leave room for literal headers, copy tags and the final tail.
-            assert_true(len(encoded) < prefix + padding + 80)
-            assert_equal(encode_snappy(data, len(encoded), 3), encoded)
-            with assert_raises():
-                _ = encode_snappy(data, len(encoded) - 1, 3)
-
-
-def test_adaptive_search_long_runs_and_short_islands() raises:
-    var expected = List[UInt8]()
-    var state = UInt32(932847)
-    # Repeatedly exercise the saturated counter and islands shorter than its
-    # stride. Missing a match is allowed; losing any skipped input byte is not.
-    for band in range(64):
-        for _ in range(65536 + band % 4):
-            state = state * UInt32(1664525) + UInt32(1013904223)
-            expected.append(UInt8(state >> 24))
-        for _ in range(8):
-            expected.append(42)
-    for i in range(256):
-        expected.append(UInt8(i % 7))
-    var encoded = encode_snappy(
-        expected, snappy_max_compressed_length(len(expected))
-    )
-    assert_equal(decode_snappy(encoded, len(expected)), expected)
+def _fnv1a(data: List[UInt8]) -> UInt64:
+    var h = UInt64(0xCBF29CE484222325)
+    for b in data:
+        h = (h ^ UInt64(b)) * UInt64(0x100000001B3)
+    return h
 
 
 def _append_varint(mut block: List[UInt8], var value: Int):
@@ -298,134 +54,13 @@ def _append_varint(mut block: List[UInt8], var value: Int):
     block.append(UInt8(value))
 
 
-def test_decoder_copy_widths_and_tails() raises:
-    # Every length, all forms, growing overlap and non-overlap at both widths.
-    for kind in [1, 2, 3]:
-        for offset in [
-            1,
-            2,
-            3,
-            4,
-            5,
-            6,
-            7,
-            8,
-            9,
-            10,
-            11,
-            12,
-            13,
-            14,
-            15,
-            16,
-            17,
-            31,
-            32,
-            33,
-        ]:
-            for count in range(1, 65):
-                if kind == 1 and (count < 4 or count > 11):
-                    continue
-                var block: List[UInt8] = [99, 98, 97]
-                _append_varint(block, offset + count)
-                block.append(UInt8((offset - 1) << 2))
-                var expected = List[UInt8]()
-                for i in range(offset):
-                    block.append(UInt8(i))
-                    expected.append(UInt8(i))
-                var tag = ((count - 1) << 2) | kind
-                if kind == 1:
-                    tag = ((count - 4) << 2) | 1
-                block.append(UInt8(tag))
-                var width = 1 if kind == 1 else (2 if kind == 2 else 4)
-                for i in range(width):
-                    block.append(UInt8((offset >> (8 * i)) & 255))
-                for i in range(count):
-                    expected.append(UInt8(i % offset))
-                assert_equal(decode_snappy(block, len(expected), 3), expected)
-                var destination = List[UInt8](
-                    length=len(expected) + 10, fill=179
-                )
-                assert_equal(
-                    decode_snappy_into(block, destination, len(expected), 3, 5),
-                    len(expected),
-                )
-                for i in range(len(expected)):
-                    assert_equal(destination[5 + i], expected[i])
-                for i in range(5):
-                    assert_equal(destination[i], UInt8(179))
-                    assert_equal(destination[5 + len(expected) + i], UInt8(179))
-                # Keep the declared size correct but exceed it with the copy.
-                var short = block.copy()
-                short[3] -= 1
-                with assert_raises():
-                    _ = decode_snappy(short, len(expected) - 1, 3)
-                with assert_raises():
-                    _ = decode_snappy_into(
-                        short, destination, len(expected) - 1, 3, 5
-                    )
-                # Each prefix that cuts a tag/offset must fail explicitly.
-                for cut in range(width + 1):
-                    var truncated = block[: len(block) - cut - 1]
-                    with assert_raises():
-                        _ = decode_snappy(
-                            List[UInt8](truncated), len(expected), 3
-                        )
-                    with assert_raises():
-                        _ = decode_snappy_into(
-                            List[UInt8](truncated),
-                            destination,
-                            len(expected),
-                            3,
-                            5,
-                        )
-                    for i in range(5):
-                        assert_equal(destination[i], UInt8(179))
-                        assert_equal(
-                            destination[5 + len(expected) + i], UInt8(179)
-                        )
-
-
-def test_four_byte_copy_chains_and_late_failure() raises:
-    # Repeated exact copies cross allocation boundaries and must only read the
-    # decoded prefix, even with caller storage filled with unrelated bytes.
-    for kind in [1, 2, 3]:
-        for offset in [1, 2, 3, 4, 5, 15, 16]:
-            var size = offset + 4 * 17
-            var block: List[UInt8] = [231, 232]
-            _append_varint(block, size)
-            block.append(UInt8((offset - 1) << 2))
-            var expected = List[UInt8]()
-            for i in range(offset):
-                block.append(UInt8(65 + i))
-                expected.append(UInt8(65 + i))
-            for _ in range(17):
-                block.append(UInt8(1 if kind == 1 else 12 | kind))
-                block.append(UInt8(offset))
-                for _ in range(0 if kind == 1 else (1 if kind == 2 else 3)):
-                    block.append(0)
-                for _ in range(4):
-                    expected.append(expected[len(expected) - offset])
-            assert_equal(decode_snappy(block, size, 2), expected)
-            var destination = List[UInt8](length=size + 8, fill=179)
-            assert_equal(
-                decode_snappy_into(block, destination, size, 2, 3), size
-            )
-            for i in range(size):
-                assert_equal(destination[3 + i], expected[i])
-            var before = destination.copy()
-            # A full copy after the advertised end must fail before any store.
-            block.append(1)
-            block.append(1)
-            with assert_raises():
-                _ = decode_snappy_into(block, destination, size, 2, 3)
-            assert_equal(destination, before)
-            with assert_raises():
-                _ = decode_snappy(block, size, 2)
-            for i in range(3):
-                assert_equal(destination[i], UInt8(179))
-            for i in range(3 + size, len(destination)):
-                assert_equal(destination[i], UInt8(179))
+def _append_literal(mut block: List[UInt8], bytes: List[UInt8]):
+    if len(bytes) <= 60:
+        block.append(UInt8((len(bytes) - 1) << 2))
+    else:
+        block.append(UInt8(60 << 2))
+        block.append(UInt8(len(bytes) - 1))
+    block.extend(bytes.copy())
 
 
 def _append_copy(mut block: List[UInt8], kind: Int, offset: Int, count: Int):
@@ -438,58 +73,332 @@ def _append_copy(mut block: List[UInt8], kind: Int, offset: Int, count: Int):
         block.append(UInt8((offset >> (8 * i)) & 255))
 
 
-def _append_literal(mut block: List[UInt8], bytes: List[UInt8]):
-    if len(bytes) <= 60:
-        block.append(UInt8((len(bytes) - 1) << 2))
-    else:
-        block.append(UInt8(60 << 2))
-        block.append(UInt8(len(bytes) - 1))
-    block.extend(bytes.copy())
+def _into_padded(block: List[UInt8], size: Int, pad: Int) raises -> List[UInt8]:
+    """Decode into dst[pad:pad+size+pad] of a sentinel buffer; check both pads.
+    """
+    var buffer = List[UInt8](length=size + 3 * pad, fill=SENTINEL)
+    var n = decompress_into(block, buffer[pad : pad + size + pad])
+    assert_equal(n, size)
+    for i in range(pad):
+        assert_equal(buffer[i], SENTINEL)
+    for i in range(pad + size, len(buffer)):
+        assert_equal(buffer[i], SENTINEL)
+    return List[UInt8](buffer[pad : pad + size])
 
 
-def _check_all_decoders(block: List[UInt8], expected: List[UInt8]) raises:
-    assert_equal(decode_snappy(block, len(expected)), expected)
+def _check_decoders(block: List[UInt8], expected: List[UInt8]) raises:
+    assert_equal(uncompressed_length(block), len(expected))
     assert_equal(decompress(block, max_output_bytes=len(expected)), expected)
-    _assert_into_matches(block, expected)
+    assert_equal(_into_padded(block, len(expected), 7), expected)
 
 
-def test_decoder_copy_positions_fast_and_exact() raises:
-    # Place each copy so it runs in the slack-using fast loop, in the exact
-    # tail, and across the transition: trailing output is 0..70 bytes and
-    # the trailing input is either tiny or large. Seeds are unique so phase
-    # or source-position errors change bytes.
+def _check_rejected(block: List[UInt8], limit: Int = 1 << 20) raises:
+    """Both decoders reject; decompress_into never writes past its window."""
+    with assert_raises():
+        _ = decompress(block, max_output_bytes=limit)
+    var buffer = List[UInt8](length=96, fill=SENTINEL)
+    try:
+        _ = decompress_into(block, buffer[8:72])
+        raise Error("decompress_into accepted a rejected block")
+    except e:
+        if String(e) == "decompress_into accepted a rejected block":
+            raise e^
+    for i in range(8):
+        assert_equal(buffer[i], SENTINEL)
+    var size: Int
+    try:
+        size = uncompressed_length(block)
+    except:
+        size = 0
+    for i in range(8 + min(size, 64), len(buffer)):
+        assert_equal(buffer[i], SENTINEL)
+
+
+def _check_roundtrip(data: List[UInt8]) raises -> List[UInt8]:
+    """Compress both ways, check the bound and round trips; return the block."""
+    var block = compress(data)
+    var bound = max_compressed_length(len(data))
+    assert_true(len(block) <= bound)
+    # compress_into may write anywhere in its bound, never past it.
+    var buffer = List[UInt8](length=bound + 32, fill=SENTINEL)
+    var n = compress_into(data, buffer[:bound])
+    assert_equal(n, len(block))
+    assert_equal(List[UInt8](buffer[:n]), block)
+    for i in range(bound, len(buffer)):
+        assert_equal(buffer[i], SENTINEL)
+    _check_decoders(block, data)
+    return block^
+
+
+# ---------------------------------------------------------------------------
+# Encoder
+# ---------------------------------------------------------------------------
+
+
+def test_matches_google_snappy_output() raises:
+    # Golden outputs from Google Snappy 1.2.2: an SSE4.2 -march=native build
+    # (CRC32C hash) and a generic build (multiplicative hash). The low-entropy
+    # and random inputs agree across both; the numeric page does not.
+    var sse42 = CompilationTarget.has_sse4()
+    var low = _check_roundtrip(_lcg_bytes(200000, 1, 2))
+    assert_equal(len(low), 94103)
+    assert_equal(_fnv1a(low), UInt64(0x9836CFDA7582D5B6))
+    var nibbles = _check_roundtrip(_lcg_bytes(200000, 2, 4))
+    assert_equal(len(nibbles), 200015)
+    assert_equal(_fnv1a(nibbles), UInt64(0xFF707581AF978670))
+    var random = _check_roundtrip(_lcg_bytes(70000, 3, 8))
+    assert_equal(len(random), 70009)
+    assert_equal(_fnv1a(random), UInt64(0x18A84A122D97DF3C))
+    var page = _check_roundtrip(_numeric_page(75000, 4))
+    if sse42:
+        assert_equal(len(page), 294701)
+        assert_equal(_fnv1a(page), UInt64(0xBB33127E123D404F))
+    else:
+        assert_equal(len(page), 293723)
+        assert_equal(_fnv1a(page), UInt64(0xD81D78C5B57A2444))
+
+
+def test_roundtrip_sizes_and_fragment_boundaries() raises:
+    # Around the 15-byte main-loop margin, 16-probe window, hash-table sizes
+    # and 64 KiB fragments, for compressible and incompressible content.
+    for size in [
+        0,
+        1,
+        3,
+        4,
+        14,
+        15,
+        16,
+        17,
+        31,
+        32,
+        33,
+        40,
+        60,
+        61,
+        255,
+        256,
+        257,
+        4095,
+        4096,
+        32767,
+        32768,
+        32769,
+        65535,
+        65536,
+        65537,
+        131072,
+        200003,
+    ]:
+        var cyclic = List[UInt8](capacity=size)
+        for i in range(size):
+            cyclic.append(UInt8(i % 251))
+        var block = _check_roundtrip(cyclic)
+        if size > 1000:
+            assert_true(len(block) < size // 2)
+        _ = _check_roundtrip(_lcg_bytes(size, UInt32(size), 8))
+        _ = _check_roundtrip(_lcg_bytes(size, UInt32(size + 1), 2))
+
+
+def test_every_small_size_and_period() raises:
+    # Every tail length through the fast-literal and probe windows, with
+    # matches ending at the final legal read.
+    for size in range(80):
+        for period in [1, 2, 3, 4, 7, 8, 16, 17]:
+            var data = List[UInt8](capacity=size)
+            for i in range(size):
+                data.append(UInt8(i % period))
+            _ = _check_roundtrip(data)
+
+
+def test_match_lengths_across_word_boundaries() raises:
+    # A repeated seed whose repetition breaks after every length 4..80 and
+    # at every offset class, so matches end on each byte of the 8- and
+    # 16-byte comparison steps and the copy-splitting thresholds (12, 64, 68).
+    for offset in [1, 2, 3, 4, 7, 8, 15, 16, 31, 32, 33, 2047, 2048, 4000]:
+        for length in [
+            4,
+            5,
+            7,
+            8,
+            11,
+            12,
+            13,
+            15,
+            16,
+            17,
+            63,
+            64,
+            65,
+            67,
+            68,
+            69,
+            80,
+        ]:
+            var data = _lcg_bytes(offset, UInt32(offset * 131 + length), 8)
+            for _ in range(length):
+                data.append(data[len(data) - offset])
+            data.append(data[len(data) - offset] ^ 0x55)
+            data.extend(_lcg_bytes(40, UInt32(length), 8))
+            _ = _check_roundtrip(data)
+
+
+def test_recovery_after_incompressible_runs() raises:
+    # Heuristic skipping must still find a later repetitive island, and
+    # skipped bytes must stay in the pending literal.
+    for prefix in [127, 128, 129, 1023, 65535, 65536, 65537, 262144]:
+        for tail in range(4):
+            var data = _lcg_bytes(prefix, 932847, 8)
+            for _ in range(256):
+                data.append(42)
+            data.extend(_lcg_bytes(tail, 7, 8))
+            var block = _check_roundtrip(data)
+            assert_true(len(block) < prefix + tail + 100)
+
+
+def test_compress_into_contract() raises:
+    var data = _lcg_bytes(1000, 5, 8)
+    var bound = max_compressed_length(len(data))
+    var small = List[UInt8](length=bound - 1, fill=SENTINEL)
+    with assert_raises():
+        _ = compress_into(data, small)
+    for i in range(len(small)):
+        assert_equal(small[i], SENTINEL)
+    # A larger buffer is fine; bytes past the bound stay untouched.
+    var large = List[UInt8](length=bound + 100, fill=SENTINEL)
+    var n = compress_into(data, large)
+    assert_equal(List[UInt8](large[:n]), compress(data))
+    for i in range(bound, len(large)):
+        assert_equal(large[i], SENTINEL)
+    # Sub-span sources and destinations.
+    var framed: List[UInt8] = [9, 9, 9]
+    framed.extend(data.copy())
+    assert_equal(compress(framed[3:]), compress(data))
+    var empty = List[UInt8]()
+    assert_equal(compress(empty), List[UInt8](length=1, fill=0))
+    var one = List[UInt8](length=max_compressed_length(0), fill=SENTINEL)
+    assert_equal(compress_into(empty, one), 1)
+    assert_equal(one[0], UInt8(0))
+
+
+def test_max_compressed_length() raises:
+    assert_equal(max_compressed_length(0), 32)
+    assert_equal(max_compressed_length(6), 39)
+    assert_equal(max_compressed_length(0xFFFFFFFF), 5010795209)
+    for bad in [-1, 0x100000000]:
+        with assert_raises():
+            _ = max_compressed_length(bad)
+
+
+# ---------------------------------------------------------------------------
+# Decoder: valid blocks
+# ---------------------------------------------------------------------------
+
+
+def test_copy_forms_and_high_offsets() raises:
+    # Literal 'x' then COPY_1, COPY_2, COPY_4, each with offset one.
     for kind in [1, 2, 3]:
-        for offset in [1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 32, 33, 64]:
+        var block: List[UInt8] = [5, 0, 120]
+        _append_copy(block, kind, 1, 4)
+        _check_decoders(block, List[UInt8](length=5, fill=120))
+    # COPY_1's high offset bits: 300 literal bytes, then offset 300 length 4.
+    var block: List[UInt8] = [176, 2, 244, 43, 1]
+    var expected = List[UInt8]()
+    for i in range(300):
+        block.append(UInt8(i & 255))
+        expected.append(UInt8(i & 255))
+    _append_copy(block, 1, 300, 4)
+    for i in range(4):
+        expected.append(UInt8(i))
+    _check_decoders(block, expected)
+    # 65536 literal bytes then COPY_4 length four at distance 65536.
+    var far: List[UInt8] = [132, 128, 4, 244, 255, 255]
+    var far_expected = List[UInt8]()
+    for i in range(65536):
+        far.append(UInt8(i & 255))
+        far_expected.append(UInt8(i & 255))
+    _append_copy(far, 3, 65536, 4)
+    for i in range(4):
+        far_expected.append(UInt8(i))
+    _check_decoders(far, far_expected)
+
+
+def test_copy_placements_fast_and_exact() raises:
+    # Each copy form, offset and length placed so it runs in the fast loop
+    # (which needs >= 16 decoded bytes, > 65 input and >= 64 output bytes
+    # left), in the exact path at the block start or tail, and across the
+    # transitions: an optional 16-byte lead-in, then 0..70 trailing output
+    # bytes with small or large trailing input.
+    for lead in [0, 16]:
+        for kind in [1, 2, 3]:
+            for offset in [1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 32, 33, 64]:
+                for count in range(1, 65):
+                    if kind == 1 and (count < 4 or count > 11):
+                        continue
+                    for trailer in [0, 1, 15, 16, 17, 47, 63, 64, 70]:
+                        var expected = _lcg_bytes(lead, UInt32(offset), 8)
+                        for i in range(offset):
+                            expected.append(UInt8(17 + 3 * i))
+                        for _ in range(count):
+                            expected.append(expected[len(expected) - offset])
+                        var block = List[UInt8]()
+                        _append_varint(block, lead + offset + count + trailer)
+                        if lead:
+                            _append_literal(block, List[UInt8](expected[:lead]))
+                        _append_literal(
+                            block, List[UInt8](expected[lead : lead + offset])
+                        )
+                        _append_copy(block, kind, offset, count)
+                        if trailer % 2 == 0:
+                            for i in range(trailer):
+                                block.append(0)
+                                block.append(UInt8(200 + i % 50))
+                                expected.append(UInt8(200 + i % 50))
+                        else:
+                            var literal = List[UInt8]()
+                            for i in range(trailer):
+                                literal.append(UInt8(i))
+                            _append_literal(block, literal)
+                            expected.extend(literal^)
+                        _check_decoders(block, expected)
+
+
+def _framed(body: List[UInt8], size: Int) -> List[UInt8]:
+    var block = List[UInt8]()
+    _append_varint(block, size)
+    block.extend(body.copy())
+    return block^
+
+
+def test_pattern_phases_and_chains() raises:
+    # Unique seed bytes reveal phase errors, including periods not dividing
+    # 16. After a 16-byte lead-in, a chain of copies advances the phase
+    # repeatedly in the fast loop (kept eligible by a 70-byte literal after
+    # it); a second chain at the very end then runs in the exact tail.
+    for period in range(1, 16):
+        for phase in range(period):
             for count in range(1, 65):
-                if kind == 1 and (count < 4 or count > 11):
-                    continue
-                for trailer in [0, 1, 15, 16, 17, 47, 63, 64, 70]:
-                    var expected = List[UInt8]()
-                    for i in range(offset):
-                        expected.append(UInt8(17 + 3 * i))
-                    for _ in range(count):
-                        expected.append(expected[len(expected) - offset])
-                    var block = List[UInt8]()
-                    _append_varint(block, offset + count + trailer)
-                    _append_literal(block, List[UInt8](expected[:offset]))
-                    _append_copy(block, kind, offset, count)
-                    # Trailer: single-byte literals keep input slack small,
-                    # one literal of many bytes keeps it large.
-                    if trailer % 2 == 0:
-                        for i in range(trailer):
-                            block.append(0)
-                            block.append(UInt8(200 + i % 50))
-                            expected.append(UInt8(200 + i % 50))
-                    else:
-                        var literal = List[UInt8]()
-                        for i in range(trailer):
-                            literal.append(UInt8(i))
-                        _append_literal(block, literal)
-                        expected.extend(literal^)
-                    _check_all_decoders(block, expected)
+                var expected = _lcg_bytes(16, UInt32(period), 8)
+                var body = List[UInt8]()
+                _append_literal(body, expected)
+                for _ in range(2):
+                    var seed = List[UInt8]()
+                    for i in range(period):
+                        seed.append(UInt8(65 + (phase + i) % period))
+                    _append_literal(body, seed)
+                    expected.extend(seed^)
+                    for _ in range(6):
+                        _append_copy(body, 2, period, count)
+                    for _ in range(6 * count):
+                        expected.append(expected[len(expected) - period])
+                    if len(body) < 200:
+                        var gap = _lcg_bytes(70, UInt32(count), 8)
+                        _append_literal(body, gap)
+                        expected.extend(gap^)
+                _check_decoders(_framed(body, len(expected)), expected)
 
 
-def test_decoder_literal_width_boundaries() raises:
+def test_literal_length_widths() raises:
     for count in [
         1,
         4,
@@ -515,241 +424,83 @@ def test_decoder_literal_width_boundaries() raises:
             var header_size = len(block)
             for i in range(width):
                 block.append(UInt8(((count - 1) >> (8 * i)) & 255))
-            # Width checks must precede loads, including zero-byte availability.
+            # Each truncation inside the length bytes rejects before loads.
             for available in range(width):
-                var truncated = List[UInt8](block[: header_size + available])
-                with assert_raises():
-                    _ = decode_snappy(truncated, count)
+                _check_rejected(List[UInt8](block[: header_size + available]))
+            var expected = List[UInt8]()
             for i in range(count):
                 block.append(UInt8(i & 255))
-            var decoded = decode_snappy(block, count)
-            for i in range(count):
-                assert_equal(decoded[i], UInt8(i & 255))
+                expected.append(UInt8(i & 255))
+            _check_decoders(block, expected)
 
 
-def test_encoder_word_match_boundaries() raises:
-    # The first four bytes have already matched. Cover every remaining byte
-    # around word/vector boundaries, with exact-size storage and overlap.
-    for alignment in range(16):
-        for offset in [1, 2, 3, 4, 7, 8, 15, 16, 31, 32, 33]:
-            var pos = alignment + offset
-            for available in range(41):
-                for mismatch in range(available + 1):
-                    var data = List[UInt8](length=pos + 4 + available, fill=0)
-                    if mismatch < available:
-                        data[pos + 4 + mismatch] = 128
-                    assert_equal(
-                        _match_length(data, alignment, pos), 4 + mismatch
-                    )
+# ---------------------------------------------------------------------------
+# Decoder: malformed blocks and limits
+# ---------------------------------------------------------------------------
 
 
-def test_encoder_word_suffix_limits() raises:
-    for alignment in range(16):
-        for length in [4, 7, 8, 11, 12, 15, 16, 19, 20, 31, 32, 33, 64, 65]:
-            var data = List[UInt8](length=alignment, fill=255)
-            for i in range(length):
-                data.append(UInt8(i % 7))
-            var expected = List[UInt8](data[alignment:])
-            var encoded = encode_snappy(
-                data, snappy_max_compressed_length(length), alignment
-            )
-            assert_equal(decode_snappy(encoded, length), expected)
-            assert_equal(encode_snappy(data, len(encoded), alignment), encoded)
-            with assert_raises():
-                _ = encode_snappy(data, len(encoded) - 1, alignment)
-
-
-def test_decoder_pattern_phases_and_chains() raises:
-    # Unique seed bytes reveal phase errors, including periods not dividing
-    # 16. Chains of copies at every period advance the phase repeatedly in
-    # the fast loop, then finish in the exact tail.
-    for period in range(1, 16):
-        for phase in range(period):
-            for count in range(1, 65):
-                var expected = List[UInt8]()
-                for i in range(period):
-                    expected.append(UInt8(65 + (phase + i) % period))
-                var block = List[UInt8]()
-                var repeats = 6
-                _append_varint(block, period + repeats * count)
-                block.append(UInt8((period - 1) << 2))
-                block.extend(expected.copy())
-                for _ in range(repeats):
-                    _append_copy(block, 2, period, count)
-                for _ in range(repeats * count):
-                    expected.append(expected[len(expected) - period])
-                _check_all_decoders(block, expected)
-
-
-def test_decoder_encoder_produced_patterns() raises:
-    for period in [1, 2, 3, 4, 5, 7, 8, 15, 16, 17]:
-        for phase in range(period):
-            for count in [
-                1,
-                period - 1,
-                period,
-                period + 1,
-                15,
-                16,
-                17,
-                63,
-                64,
-                65,
-                257,
-            ]:
-                var expected = List[UInt8]()
-                for i in range(count):
-                    expected.append(UInt8(65 + (phase + i) % period))
-                var encoded = encode_snappy(
-                    expected, snappy_max_compressed_length(count)
-                )
-                assert_equal(decode_snappy(encoded, count), expected)
-
-
-def test_into_reuse_and_boundaries() raises:
-    var dst = List[UInt8](length=1100, fill=177)
-    var address = UInt(dst.unsafe_ptr())
-    for n in [0, 1, 64, 1024, 5, 0, 257, 16]:
-        var raw = List[UInt8]()
-        for i in range(n):
-            raw.append(UInt8(i % 7))
-        var block = encode_snappy(raw, 2000)
-        var framed: List[UInt8] = [99, 98]
-        framed.extend(block[:])
-        var before = dst.copy()
-        assert_equal(decode_snappy_into(framed, dst, n, 2, 5), n)
-        assert_equal(len(dst), 1100)
-        assert_equal(UInt(dst.unsafe_ptr()), address)
-        for i in range(5):
-            assert_equal(dst[i], before[i])
-        for i in range(n):
-            assert_equal(dst[5 + i], raw[i])
-        for i in range(5 + n, len(dst)):
-            assert_equal(dst[i], before[i])
-        if n:
-            with assert_raises():
-                _ = decode_snappy_into(block, dst, n, 0, len(dst) - n + 1)
-
-
-def test_into_failure_contract() raises:
+def test_rejects_truncation_and_trailing_commands() raises:
     var good: List[UInt8] = [5, 0, 120, 14, 1, 0]
-    var dst = List[UInt8](length=20, fill=77)
-    var bad: List[UInt8] = [5, 0, 120, 14, 0, 0]
-    with assert_raises():
-        _ = decode_snappy_into(bad, dst, 5, 0, 3)
-    assert_equal(dst[3], UInt8(120))
-    for i in range(len(dst)):
-        if i != 3:
-            assert_equal(dst[i], UInt8(77))
-    # Existing prefix must not legitimize a backreference before decoded byte 0.
+    _check_decoders(good, List[UInt8](length=5, fill=120))
+    for cut in range(len(good)):
+        _check_rejected(List[UInt8](good[:cut]))
+    # Every copy form rejects every truncated offset.
+    for kind in [1, 2, 3]:
+        var width = 1 if kind == 1 else (2 if kind == 2 else 4)
+        var tag = 1 if kind == 1 else (12 | kind)
+        for count in range(width):
+            var block: List[UInt8] = [5, 0, 120, UInt8(tag)]
+            for i in range(count):
+                block.append(UInt8(1 if i == 0 else 0))
+            _check_rejected(block)
+    # Declared size smaller or larger than the commands produce.
+    for declared in [4, 6]:
+        var bad = good.copy()
+        bad[0] = UInt8(declared)
+        _check_rejected(bad)
+    var trailing = good.copy()
+    trailing.append(0)
+    trailing.append(42)
+    _check_rejected(trailing)
+
+
+def test_rejects_invalid_offsets_and_lengths() raises:
+    for offset in [0, 2]:
+        var bad: List[UInt8] = [5, 0, 120, 14, UInt8(offset), 0]
+        _check_rejected(bad)
+    # Four-byte literal lengths must not wrap at the UInt32 boundary.
+    for last in [254, 255]:
+        _check_rejected([1, 252, UInt8(last), 255, 255, 255, 120])
+    _check_rejected([1, 252, 255, 255, 255, 255])
+    _check_rejected([0, 0, 42])
+    _check_rejected([1])
+    # A copy may not reach before the block's own output, even when the
+    # destination buffer holds earlier bytes.
     var bad_offset: List[UInt8] = [4, 14, 1, 0]
-    var before = dst.copy()
+    var buffer = List[UInt8](length=16, fill=SENTINEL)
     with assert_raises():
-        _ = decode_snappy_into(bad_offset, dst, 4, 0, 8)
-    assert_equal(dst, before)
-    for size in [-1, 4, 6, 0x100000000]:
-        with assert_raises():
-            _ = decode_snappy_into(good, dst, size)
-        assert_equal(dst, before)
-    for start in [-1, len(good) + 1]:
-        with assert_raises():
-            _ = decode_snappy_into(good, dst, 5, start)
-        assert_equal(dst, before)
-    for start in [-1, len(dst) + 1, 0x7FFFFFFFFFFFFFFF]:
-        with assert_raises():
-            _ = decode_snappy_into(good, dst, 5, 0, start)
-        assert_equal(dst, before)
-    var reserved = List[UInt8](capacity=100)
-    with assert_raises():
-        _ = decode_snappy_into(good, reserved, 5)
-    var zero: List[UInt8] = [0]
-    assert_equal(decode_snappy_into(zero, dst, 0, 0, len(dst)), 0)
-    assert_equal(decode_snappy_into(zero, reserved, 0), 0)
-    assert_equal(dst, before)
-    var missing = List[UInt8]()
-    with assert_raises():
-        _ = decode_snappy_into(missing, dst, 0)
+        _ = decompress_into(bad_offset, buffer[8:])
+    for i in range(8):
+        assert_equal(buffer[i], SENTINEL)
+    # Invalid offsets deep inside a block, where the fast loop runs: 200
+    # literal bytes, valid copies, then a copy reaching before byte zero.
+    for kind in [1, 2, 3]:
+        var block = List[UInt8]()
+        _append_varint(block, 200 + 40 * 8 + 4 + 200)
+        _append_literal(block, _lcg_bytes(60, 1, 8))
+        _append_literal(block, _lcg_bytes(60, 2, 8))
+        _append_literal(block, _lcg_bytes(60, 3, 8))
+        _append_literal(block, _lcg_bytes(20, 4, 8))
+        for _ in range(40):
+            _append_copy(block, 2, 100, 8)
+        # Offset 521 exceeds the 520 decoded bytes; COPY_1 can encode it.
+        _append_copy(block, kind, 200 + 40 * 8 + 1, 4)
+        for _ in range(4):
+            _append_literal(block, _lcg_bytes(50, 5, 8))
+        _check_rejected(block)
 
 
-def _assert_into_rejects(data: List[UInt8], expected_size: Int) raises:
-    var destination = List[UInt8](length=expected_size + 10, fill=179)
-    with assert_raises():
-        _ = decode_snappy_into(data, destination, expected_size, 0, 5)
-    for i in range(5):
-        assert_equal(destination[i], UInt8(179))
-        assert_equal(destination[5 + expected_size + i], UInt8(179))
-
-
-def test_into_headers_literals_and_trailing_commands() raises:
-    _assert_into_rejects([255, 255, 255, 255, 16], 0)
-    _assert_into_rejects([128, 128, 128, 128, 128], 0)
-    _assert_into_rejects([1, 252, 255, 255, 255, 255], 1)
-    _assert_into_rejects([0, 0, 42], 0)
-    _assert_into_rejects([1], 1)
-    for width in range(1, 5):
-        var block: List[UInt8] = [1, UInt8((59 + width) << 2)]
-        for _ in range(width):
-            block.append(0)
-        block.append(42)
-        var destination = List[UInt8](length=3, fill=179)
-        assert_equal(decode_snappy_into(block, destination, 1, 0, 1), 1)
-        var expected: List[UInt8] = [179, 42, 179]
-        assert_equal(destination, expected)
-        for cut in range(len(block)):
-            _assert_into_rejects(List[UInt8](block[:cut]), 1)
-
-
-def test_convenience_roundtrips_and_budgets() raises:
-    for start in range(4):
-        for size in [0, 1, 3, 4, 60, 128, 256, 16384, 65536]:
-            var data = List[UInt8](length=start, fill=179)
-            for i in range(size):
-                data.append(UInt8(i % 251))
-            var packed = compress(data, start=start)
-            assert_equal(
-                packed,
-                encode_snappy(data, snappy_max_compressed_length(size), start),
-            )
-            assert_equal(
-                compress(data, max_output_bytes=len(packed), start=start),
-                packed,
-            )
-            with assert_raises():
-                _ = compress(
-                    data, max_output_bytes=len(packed) - 1, start=start
-                )
-            var framed: List[UInt8] = [99, 98, 97]
-            framed.extend(packed[:])
-            assert_equal(uncompressed_length(framed, 3), size)
-            var expected = List[UInt8](data[start:])
-            assert_equal(
-                decompress(framed, max_output_bytes=size, start=3), expected
-            )
-            assert_equal(
-                decompress(framed, max_output_bytes=size + 10, start=3),
-                expected,
-            )
-            if size:
-                with assert_raises():
-                    _ = decompress(framed, max_output_bytes=size - 1, start=3)
-    var empty = List[UInt8]()
-    with assert_raises():
-        _ = compress(empty, max_output_bytes=0)
-    with assert_raises():
-        _ = compress(empty, max_output_bytes=-1)
-    var zero: List[UInt8] = [0]
-    with assert_raises():
-        _ = decompress(zero, max_output_bytes=-1)
-    for start in [-1, 2]:
-        with assert_raises():
-            _ = compress(zero, start=start)
-        with assert_raises():
-            _ = decompress(zero, max_output_bytes=1, start=start)
-        with assert_raises():
-            _ = uncompressed_length(zero, start)
-
-
-def test_uncompressed_length_header_only() raises:
+def test_headers_and_output_limits() raises:
     for size in [0, 1, 127, 128, 16383, 16384, 0x0FFFFFFF, 0xFFFFFFFF]:
         var header = List[UInt8]()
         _append_varint(header, size)
@@ -758,9 +509,8 @@ def test_uncompressed_length_header_only() raises:
             with assert_raises():
                 _ = uncompressed_length(List[UInt8](header[:cut]))
         if size:
-            # A valid header does not validate the block or allocate its size.
-            with assert_raises():
-                _ = decompress(header, max_output_bytes=0x100000000)
+            # A header alone is not a valid block and allocates nothing.
+            _check_rejected(header, 0x100000000)
         header.append(255)
         assert_equal(uncompressed_length(header), size)
     var noncanonical: List[UInt8] = [128, 128, 128, 128, 0]
@@ -770,32 +520,50 @@ def test_uncompressed_length_header_only() raises:
         var overflow: List[UInt8] = [255, 255, 255, 255, UInt8(last)]
         with assert_raises():
             _ = uncompressed_length(overflow)
+        _check_rejected(overflow, 0x100000000)
+    # Sizes the input cannot produce reject before allocation.
+    _check_rejected([255, 255, 255, 255, 15], 0x100000000)
+    # max_output_bytes and destination length bound the advertised size.
+    var block = compress(_lcg_bytes(1000, 3, 2))
+    assert_equal(len(decompress(block, max_output_bytes=1000)), 1000)
+    for limit in [-1, 0, 999]:
         with assert_raises():
-            _ = decompress(overflow, max_output_bytes=0x100000000)
+            _ = decompress(block, max_output_bytes=limit)
+    var buffer = List[UInt8](length=1100, fill=SENTINEL)
+    with assert_raises():
+        _ = decompress_into(block, buffer[:999])
+    for i in range(len(buffer)):
+        assert_equal(buffer[i], SENTINEL)
+    var empty = List[UInt8]()
+    with assert_raises():
+        _ = uncompressed_length(empty)
+    with assert_raises():
+        _ = decompress(empty, max_output_bytes=10)
 
 
-def test_decompress_validates_entire_block() raises:
-    var good: List[UInt8] = [5, 0, 120, 14, 1, 0]
-    for cut in range(len(good)):
-        with assert_raises():
-            _ = decompress(List[UInt8](good[:cut]), max_output_bytes=100)
-    for offset in [0, 2]:
-        var bad = good.copy()
-        bad[4] = UInt8(offset)
-        with assert_raises():
-            _ = decompress(bad, max_output_bytes=100)
-    for declared in [4, 6]:
-        var bad = good.copy()
-        bad[0] = UInt8(declared)
-        with assert_raises():
-            _ = decompress(bad, max_output_bytes=100)
-    good.append(0)
-    good.append(42)
-    with assert_raises():
-        _ = decompress(good, max_output_bytes=100)
-    var literal_overflow: List[UInt8] = [1, 252, 255, 255, 255, 255]
-    with assert_raises():
-        _ = decompress(literal_overflow, max_output_bytes=100)
+def test_decompress_into_reuse() raises:
+    # One buffer reused for blocks of varying sizes, including zero; only
+    # the decoded prefix changes and storage never moves.
+    var buffer = List[UInt8](length=1100, fill=SENTINEL)
+    var address = UInt(buffer.unsafe_ptr())
+    for n in [0, 1, 64, 1024, 5, 0, 257, 16, 1100]:
+        var raw = _lcg_bytes(n, UInt32(n), 3)
+        var block = compress(raw)
+        var before = buffer.copy()
+        assert_equal(decompress_into(block, buffer), n)
+        assert_equal(len(buffer), 1100)
+        assert_equal(UInt(buffer.unsafe_ptr()), address)
+        assert_equal(List[UInt8](buffer[:n]), raw)
+        for i in range(n, len(buffer)):
+            assert_equal(buffer[i], before[i])
+    # A compressed block embedded in a larger stream, decoded into a slice.
+    var framed: List[UInt8] = [99, 98]
+    var raw = _lcg_bytes(300, 1, 2)
+    framed.extend(compress(raw))
+    framed.append(97)
+    var block_end = len(framed) - 1
+    assert_equal(decompress(framed[2:block_end], max_output_bytes=300), raw)
+    _check_rejected(List[UInt8](framed[2:]))
 
 
 def main() raises:

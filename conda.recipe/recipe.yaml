@@ -1,5 +1,5 @@
 context:
-  version: "0.1.0"
+  version: "0.2.0"
 
 package:
   name: mojo-snappy
@@ -17,8 +17,7 @@ source:
     - README.md
 
 build:
-  # Build 0 was used by pre-release pixi-build-mojo artifacts.
-  number: 1
+  number: 0
   skip: not linux or not x86_64
   files:
     - lib/mojo/mojo_snappy.mojoc

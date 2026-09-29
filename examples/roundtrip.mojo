@@ -2,8 +2,10 @@
 from std.testing import assert_equal
 from mojo_snappy import (
     compress,
+    compress_into,
     decompress,
-    decode_snappy_into,
+    decompress_into,
+    max_compressed_length,
 )
 
 
@@ -12,9 +14,11 @@ def main() raises:
     var compressed = compress(original)
     var restored = decompress(compressed, max_output_bytes=4096)
     assert_equal(restored, original)
-    # Reuse initialized storage without allocating a new decoded list.
+    # Reuse caller-owned buffers: slices select the region to use.
+    var packed = List[UInt8](length=max_compressed_length(len(original)), fill=0)
+    var packed_size = compress_into(original, packed)
     var scratch = List[UInt8](length=len(original), fill=0)
-    _ = decode_snappy_into(compressed, scratch, len(original))
+    _ = decompress_into(packed[:packed_size], scratch)
     assert_equal(scratch, original)
     print(
         len(original),

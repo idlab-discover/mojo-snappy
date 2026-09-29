@@ -11,7 +11,7 @@ optional development oracles; they are not library runtime dependencies.
 - Repository and distribution: `mojo-snappy`
 - Mojo import: `mojo_snappy`
 - Precompiled artifact: `mojo_snappy.mojoc`
-- Library version: `0.1.0`, independent of the compiler version `1.0.0`
+- Library version: `0.2.0`, independent of the compiler version `1.0.0`
 
 This implements raw Snappy blocks. The optional Snappy framed stream format,
 stream identifiers and CRC32C checksums are not implemented. Parquet integration
@@ -27,68 +27,51 @@ var encoded = compress(data)
 var decoded = decompress(encoded, max_output_bytes=4096)
 ```
 
-The public functions borrow `List[UInt8]` inputs. For ordinary use:
+Every function takes byte `Span`s; a `List[UInt8]` converts implicitly, and a
+slice such as `data[16:]` selects part of a buffer without copying.
 
-- `compress(data, *, max_output_bytes=None, start=0)` encodes the source suffix.
-  By default it computes a sufficient encoded-size bound; supply a tighter
-  `max_output_bytes` to enforce your own budget. Output bytes match `encode_snappy`.
-- `decompress(data, *, max_output_bytes, start=0)` decodes a raw block when its
-  exact output size is unknown. The required, nonnegative cap limits decoded byte
-  length. The advertised size must fit the cap, and the entire block must validate.
-  Sizes the compressed input cannot produce are rejected before any allocation.
-- `uncompressed_length(data, start=0)` returns the UInt32 size advertised by the
-  header, without allocating output. It rejects truncated or overflowing headers,
-  but **does not validate the remaining block**. Apply your own size budget before
-  using this value to allocate storage.
+| Function | Result |
+|---|---|
+| `compress(src)` | New `List[UInt8]` holding the raw Snappy block. |
+| `compress_into(src, dst)` | Block size; the block is `dst[:size]`. Requires `len(dst) >= max_compressed_length(len(src))`. |
+| `max_compressed_length(n)` | Worst-case block size for `n` bytes (`32 + n + n // 6`, as in Google Snappy), for `0 <= n < 2**32`. |
+| `uncompressed_length(src)` | Decoded size advertised by the header. Validates **only the header**. |
+| `decompress(src, *, max_output_bytes)` | New `List[UInt8]`. Raises if the advertised size exceeds the nonnegative limit. |
+| `decompress_into(src, dst)` | Decoded size `n`; the data is `dst[:n]`. Requires `n <= len(dst)`. |
 
-For exact-size validation and caller-owned storage, the existing functions remain
-available with unchanged arguments:
+Both decoders validate the complete block: truncation, invalid offsets, output
+overruns, trailing commands, and any decoded size other than the advertised one
+raise. They support all copy forms, including overlapping backreferences, and
+need no input padding. `decompress` allocates the advertised size only when the
+compressed input could produce it (each input byte decodes to at most 64/3
+bytes), so a header alone cannot trigger an allocation beyond about 21x the input
+length. When independent metadata supplies the exact size, for example a Parquet
+page header, check that `len(result)` (or the returned `n`) equals it.
 
-- `encode_snappy(data, max_output_bytes, start=0)` encodes the source suffix and
-  raises if encoded output would exceed the supplied byte-length limit.
-- `decode_snappy(data, expected_size, start=0)` decodes a raw block from the suffix,
-  requiring the declared and actual output lengths to equal `expected_size`.
-  Invalid offsets, truncated commands, output overruns and trailing commands reject.
-- `decode_snappy_into(data, destination, expected_size, start=0, destination_start=0)`
-  decodes into an initialized, caller-owned List and returns `expected_size`.
-  It performs no output allocation or resizing, enabling buffer reuse and decoding
-  directly into a larger final buffer.
-- `snappy_max_compressed_length(size)` supplies a conservative encoded-size bound
-  for input lengths from zero through `2**32 - 1`.
-
-For reusable storage:
+Reusing caller-owned buffers avoids per-call allocation:
 
 ```mojo
-from mojo_snappy import decode_snappy_into
+from mojo_snappy import compress_into, decompress_into, max_compressed_length
 
-var destination = List[UInt8](length=len(data), fill=0)
-_ = decode_snappy_into(encoded, destination, len(data))
+var packed = List[UInt8](length=max_compressed_length(len(data)), fill=0)
+var size = compress_into(data, packed)
+var restored = List[UInt8](length=len(data), fill=0)
+_ = decompress_into(packed[:size], restored)
 ```
 
-`destination` must have enough **initialized length**, not just reserved capacity,
-for `destination_start + expected_size` bytes. Its prefix and tail remain untouched.
-Late errors may leave arbitrary bytes in the target range; only consume it after success.
-Input and destination must be distinct Lists. Reuse the buffer after consumers have
-finished with its previous contents. For a prefixed final buffer, pass its prefix
-length as `destination_start`; `start` independently selects the compressed suffix.
+Destinations need initialized **length**, not just reserved capacity.
+`decompress_into` writes only `dst[:n]` and `compress_into` only
+`dst[:max_compressed_length(len(src))]`; bytes beyond are never touched. After an
+error, the written range may hold arbitrary bytes. Source and destination must
+not overlap.
 
-`compress`, `decompress`, `encode_snappy` and `decode_snappy` return newly owned
-Lists. Use `decode_snappy` when independent metadata supplies the exact output size;
-unlike a maximum, this also rejects blocks whose decoded size is smaller than expected.
-Both allocating decoders allocate the advertised size up front only when the
-compressed input could produce it: each input byte decodes to at most 64/3 bytes,
-so a header alone cannot trigger an allocation beyond about 21x the input length.
-Larger advertised sizes reject immediately. Caller-owned decoding
-requires the caller to choose and allocate an acceptable output size in advance.
-Both decoders support all Snappy copy forms and overlapping backreferences and
-require no input padding.
 The encoder is a port of Google Snappy 1.2.2 level-1 compression and produces
 byte-identical output to Google Snappy built for the same target: with SSE4.2 it
 hashes with CRC32C like a `-march=native` x86 build; elsewhere it uses the portable
-multiplicative hash of generic builds (such as distribution packages).
-Byte-length limits are not exact allocation or RSS limits: encoding always
-reserves the worst-case bound and checks `max_output_bytes` against the result.
-See [third-party notices](THIRD_PARTY_NOTICES.md) for upstream attribution.
+multiplicative hash of generic builds (such as distribution packages). The
+precompiled package selects the hash for each consumer's target.
+See [third-party notices](THIRD_PARTY_NOTICES.md) for upstream attribution and
+[0.2.0 release notes](docs/release-0.2.0.md) for migrating from 0.1.0.
 
 ## Benchmarks
 
@@ -247,7 +230,8 @@ been configured or publication claimed; there is no Python API or wheel.
 GitHub CI runs the source/package checks, both oracle assertion modes and the
 isolated Conda installation tests. It uploads the package, SHA256 checksums and
 checkout commit as CI artifacts. See [distribution and tagging](docs/distribution.md)
-and the [0.1.0 release candidate notes](docs/release-0.1.0.md).
+the [0.2.0 release notes](docs/release-0.2.0.md) and the
+[0.1.0 release notes](docs/release-0.1.0.md).
 
 ## License
 

@@ -116,27 +116,17 @@ def _copy_bytes(
 # ---------------------------------------------------------------------------
 
 
-@always_inline
-def _read_le[count: Int](data: List[UInt8], mut cursor: Int) raises -> Int:
-    """Read 1..4 bytes with one shared truncation check before fixed accesses.
+def _read_header(src: Span[UInt8, _], mut cursor: Int) raises -> Int:
+    """Parse the varint32 decoded length at src[cursor:], advancing past it.
 
-    Internal callers maintain 0 <= cursor <= len(data); no padding is read.
+    Rejects truncated headers and values above 2**32 - 1.
     """
-    comptime assert 1 <= count <= 4
-    if count > len(data) - cursor:
-        raise Error("Truncated Snappy block")
-    var value = UInt64(0)
-    comptime for i in range(count):
-        value |= UInt64(data[cursor + i]) << UInt64(8 * i)
-    cursor += count
-    return Int(value)
-
-
-def _read_header(data: List[UInt8], mut cursor: Int) raises -> Int:
-    """Parse the varint32 decoded length at cursor, advancing past it."""
     var declared = UInt64(0)
     for i in range(5):
-        var byte = _read_le[1](data, cursor)
+        if cursor >= len(src):
+            raise Error("Truncated Snappy header")
+        var byte = Int(src[cursor])
+        cursor += 1
         if i == 4 and byte > 15:
             raise Error("Snappy length overflow")
         declared |= UInt64(byte & 127) << UInt64(7 * i)
@@ -425,109 +415,72 @@ def _decode_block(
     return op
 
 
-def decode_snappy(
-    data: List[UInt8], expected_size: Int, start: Int = 0
-) raises -> List[UInt8]:
-    """Decode a block only if its declared and actual sizes equal expected_size.
+def uncompressed_length(src: Span[UInt8, _]) raises -> Int:
+    """Return the decoded size advertised by a block header.
+
+    Validates only the header, not the remaining block, and allocates
+    nothing. The result is not evidence that the block is valid or that its
+    size is safe to allocate.
     """
-    if expected_size < 0 or UInt64(expected_size) > UInt64(0xFFFFFFFF):
-        raise Error("Invalid Snappy expected size")
-    if start < 0 or start > len(data):
-        raise Error("Invalid Snappy source start")
-    var cursor = start
-    if _read_header(data, cursor) != expected_size:
-        raise Error("Snappy declared length mismatch")
+    var cursor = 0
+    return _read_header(src, cursor)
+
+
+def decompress(
+    src: Span[UInt8, _], *, max_output_bytes: Int
+) raises -> List[UInt8]:
+    """Decode a complete raw Snappy block into a new List.
+
+    Raises if the advertised size exceeds max_output_bytes (which must be
+    nonnegative), if the block is malformed, or if it decodes to any size
+    other than the advertised one. Output is allocated only for a size the
+    input could actually produce, at most 64/3 bytes per compressed byte,
+    so a header alone cannot force an allocation beyond that.
+    """
+    if max_output_bytes < 0:
+        raise Error("Invalid Snappy output limit")
+    var cursor = 0
+    var size = _read_header(src, cursor)
+    if size > max_output_bytes:
+        raise Error("Snappy decoded output exceeds limit")
     # Every command byte decodes to at most 64/3 output bytes (a 3-byte
-    # COPY_2 of length 64), so a larger size cannot be valid. Rejecting it
-    # bounds the allocation by the compressed input, never by the header.
-    if UInt64(expected_size) * 3 > UInt64(len(data) - cursor) * 64:
+    # COPY_2 of length 64), so a larger size cannot be valid.
+    if UInt64(size) * 3 > UInt64(len(src) - cursor) * 64:
         raise Error("Snappy declared length exceeds maximum expansion")
-    var result = List[UInt8](unsafe_uninit_length=expected_size)
-    var written = _decode_block(
-        data.unsafe_ptr(),
-        cursor,
-        len(data),
-        result.unsafe_ptr(),
-        0,
-        expected_size,
-    )
-    if written != expected_size:
+    var result = List[UInt8](unsafe_uninit_length=size)
+    if (
+        _decode_block(
+            src.unsafe_ptr(), cursor, len(src), result.unsafe_ptr(), 0, size
+        )
+        != size
+    ):
         raise Error("Snappy decoded length mismatch")
     return result^
 
 
-def decode_snappy_into(
-    data: List[UInt8],
-    mut destination: List[UInt8],
-    expected_size: Int,
-    start: Int = 0,
-    destination_start: Int = 0,
+def decompress_into(
+    src: Span[UInt8, _], dst: Span[mut=True, UInt8, _]
 ) raises -> Int:
-    """Decode data[start:] into initialized caller-owned List storage.
+    """Decode a complete raw Snappy block into dst and return its size n.
 
-    Return expected_size after exact header and output-size validation.
-    Write only destination[destination_start:destination_start+expected_size].
-    Destination length (not reserved capacity) must cover that range. Neither
-    list is resized; prefix and tail stay untouched, including on errors.
-    Late errors may leave arbitrary bytes anywhere in the target range.
-    Input and destination are distinct owners with immutable/mutable borrows;
-    safe callers cannot pass the same List for both. No view escapes the call.
+    Requires uncompressed_length(src) <= len(dst). Writes only dst[:n]; bytes
+    from dst[n:] are never written or read. Raises for malformed blocks and
+    for any decoded size other than the advertised one, after which dst[:n]
+    may hold arbitrary bytes. To require an exact size, pass a slice of that
+    length and compare the result. src and dst must not overlap.
     """
-    if expected_size < 0 or UInt64(expected_size) > UInt64(0xFFFFFFFF):
-        raise Error("Invalid Snappy expected size")
-    if start < 0 or start > len(data):
-        raise Error("Invalid Snappy source start")
-    if destination_start < 0 or destination_start > len(destination):
-        raise Error("Invalid Snappy destination start")
-    if expected_size > len(destination) - destination_start:
+    var cursor = 0
+    var size = _read_header(src, cursor)
+    if size > len(dst):
         raise Error("Snappy destination too small")
-    var cursor = start
-    if _read_header(data, cursor) != expected_size:
-        raise Error("Snappy declared length mismatch")
-    var end = destination_start + expected_size
-    var written = _decode_block(
-        data.unsafe_ptr(),
-        cursor,
-        len(data),
-        destination.unsafe_ptr(),
-        destination_start,
-        end,
-    )
-    if written != end:
+    if (
+        _decode_block(
+            src.unsafe_ptr(), cursor, len(src), dst.unsafe_ptr(), 0, size
+        )
+        != size
+    ):
         raise Error("Snappy decoded length mismatch")
-    return expected_size
-
-
-def uncompressed_length(data: List[UInt8], start: Int = 0) raises -> Int:
-    """Read the UInt32 output size advertised by the header at start.
-
-    Validate only the header, not the remaining block. No output is allocated.
-    A returned size is not evidence that the block is valid or safe to allocate.
-    """
-    if start < 0 or start > len(data):
-        raise Error("Invalid Snappy source start")
-    var cursor = start
-    return _read_header(data, cursor)
-
-
-def decompress(
-    data: List[UInt8], *, max_output_bytes: Int, start: Int = 0
-) raises -> List[UInt8]:
-    """Decode data[start:] when its exact size is unknown but bounded.
-
-    max_output_bytes must be nonnegative and limits decoded byte length, not
-    allocation capacity or RSS. Reject an advertised size above this limit
-    before decoding, then validate the complete block. Output is allocated
-    only for sizes the compressed input could actually produce (at most 64/3
-    bytes per input byte), never for an arbitrary header value.
-    Use decode_snappy instead when an independent exact size is known.
-    """
-    if max_output_bytes < 0:
-        raise Error("Invalid Snappy output limit")
-    var expected_size = uncompressed_length(data, start)
-    if expected_size > max_output_bytes:
-        raise Error("Snappy decoded output exceeds limit")
-    return decode_snappy(data, expected_size, start)
+    return size
 
 
 # ---------------------------------------------------------------------------
@@ -544,11 +497,6 @@ def _hash_table_size(size: Int) -> Int:
     while count < min(size, _MAX_HASH_TABLE_SIZE):
         count *= 2
     return count
-
-
-def _load4(data: List[UInt8], pos: Int) -> UInt32:
-    """Load four little-endian bytes after the caller proves pos+4 <= len."""
-    return _ld32(data.unsafe_ptr(), pos)
 
 
 @always_inline
@@ -619,14 +567,6 @@ def _find_match_length(
             return matched
         matched += 1
     return matched
-
-
-def _match_length(data: List[UInt8], candidate: Int, pos: Int) -> Int:
-    """Extend four equal bytes, with candidate < pos <= len(data) - 4."""
-    var ignored = UInt64(0)
-    return 4 + _find_match_length(
-        data.unsafe_ptr(), candidate + 4, pos + 4, len(data), ignored
-    )
 
 
 @always_inline
@@ -846,32 +786,25 @@ def _compress_fragment[
     return op
 
 
-def snappy_max_compressed_length(size: Int) raises -> Int:
-    """Conservative encoded bound for this encoder, for a UInt32 input size."""
-    if size < 0 or UInt64(size) > UInt64(0xFFFFFFFF):
-        raise Error("Invalid Snappy input size")
-    return 32 + size + size // 6
+def max_compressed_length(source_length: Int) raises -> Int:
+    """Worst-case compressed size for a source of 0..2**32 - 1 bytes.
 
-
-def encode_snappy(
-    data: List[UInt8], max_output_bytes: Int, start: Int = 0
-) raises -> List[UInt8]:
-    """Encode a raw block, raising if its length would exceed the limit.
-
-    Output is written into a buffer sized for the worst case of each 64 KiB
-    fragment plus slack, so its capacity may exceed its final length. The
-    limit therefore bounds the returned byte length, not the allocation.
+    Matches Google Snappy's MaxCompressedLength: 32 + n + n / 6.
     """
-    if start < 0 or start > len(data):
-        raise Error("Invalid Snappy source start")
-    var size = len(data) - start
-    if max_output_bytes < 0 or UInt64(size) > UInt64(0xFFFFFFFF):
-        raise Error("Invalid Snappy input size or output limit")
-    # Five varint bytes plus MaxCompressedLength per fragment. Summing the
-    # per-fragment bounds keeps each fragment's 32 bytes of overwrite slack.
-    var capacity = 5 + size + size // 6 + 32 * (size // _BLOCK_SIZE + 1)
-    var output = List[UInt8](unsafe_uninit_length=capacity)
-    var dst = output.unsafe_ptr()
+    if source_length < 0 or UInt64(source_length) > UInt64(0xFFFFFFFF):
+        raise Error("Invalid Snappy input size")
+    return 32 + source_length + source_length // 6
+
+
+def _compress_block(
+    src: Span[UInt8, _], dst: Pointer[mut=True, UInt8, _]
+) -> Int:
+    """Compress src into dst, which has max_compressed_length(len(src)) bytes.
+
+    Like Google Snappy's RawCompress, fragments write directly into dst and
+    their bounded overwrites fit within that single worst-case bound.
+    """
+    var size = len(src)
     var op = 0
     var remaining = size
     while remaining >= 128:
@@ -880,47 +813,53 @@ def encode_snappy(
         remaining >>= 7
     dst[unsafe_offset=op] = UInt8(remaining)
     op += 1
-    if size > 0:
-        # Each fragment clears the prefix it uses before reading it.
-        var table = List[UInt16](
-            unsafe_uninit_length=_hash_table_size(min(size, _BLOCK_SIZE))
-        )
-        var src = data.unsafe_ptr()
-        var pos = start
-        var end = start + size
-        while pos < end:
-            var fragment = min(end - pos, _BLOCK_SIZE)
-            var table_size = _hash_table_size(fragment)
-            unsafe_memset_zero(table.unsafe_ptr(), table_size)
-            if table_size == _MAX_HASH_TABLE_SIZE:
-                op = _compress_fragment[_MAX_HASH_TABLE_SIZE](
-                    src, pos, fragment, dst, op, table.unsafe_ptr(), table_size
-                )
-            else:
-                op = _compress_fragment[0](
-                    src, pos, fragment, dst, op, table.unsafe_ptr(), table_size
-                )
-            pos += fragment
-    if op > max_output_bytes:
-        raise Error("Snappy encoded output exceeds limit")
-    output.resize(op, fill=0)
+    if size == 0:
+        return op
+    # Each fragment clears the prefix it uses before reading it.
+    var table = List[UInt16](
+        unsafe_uninit_length=_hash_table_size(min(size, _BLOCK_SIZE))
+    )
+    var input = src.unsafe_ptr()
+    var pos = 0
+    while pos < size:
+        var fragment = min(size - pos, _BLOCK_SIZE)
+        var table_size = _hash_table_size(fragment)
+        unsafe_memset_zero(table.unsafe_ptr(), table_size)
+        if table_size == _MAX_HASH_TABLE_SIZE:
+            op = _compress_fragment[_MAX_HASH_TABLE_SIZE](
+                input, pos, fragment, dst, op, table.unsafe_ptr(), table_size
+            )
+        else:
+            op = _compress_fragment[0](
+                input, pos, fragment, dst, op, table.unsafe_ptr(), table_size
+            )
+        pos += fragment
+    return op
+
+
+def compress(src: Span[UInt8, _]) raises -> List[UInt8]:
+    """Compress src into a new raw Snappy block.
+
+    Raises only for sources longer than 2**32 - 1 bytes. The result's
+    capacity is max_compressed_length(len(src)); its length is the block size.
+    """
+    var output = List[UInt8](
+        unsafe_uninit_length=max_compressed_length(len(src))
+    )
+    var size = _compress_block(src, output.unsafe_ptr())
+    output.resize(size, fill=0)
     return output^
 
 
-def compress(
-    data: List[UInt8],
-    *,
-    max_output_bytes: Optional[Int] = None,
-    start: Int = 0,
-) raises -> List[UInt8]:
-    """Compress data[start:], computing a sufficient output limit by default.
+def compress_into(
+    src: Span[UInt8, _], dst: Span[mut=True, UInt8, _]
+) raises -> Int:
+    """Compress src into dst and return the block size.
 
-    Supply max_output_bytes to enforce a tighter encoded byte-length budget.
-    The limit is not an allocation or RSS bound.
+    Requires len(dst) >= max_compressed_length(len(src)). Any byte of that
+    worst-case prefix may be written; bytes beyond it are never touched.
+    src and dst must not overlap.
     """
-    if start < 0 or start > len(data):
-        raise Error("Invalid Snappy source start")
-    var limit = snappy_max_compressed_length(len(data) - start)
-    if max_output_bytes:
-        limit = max_output_bytes.value()
-    return encode_snappy(data, limit, start)
+    if len(dst) < max_compressed_length(len(src)):
+        raise Error("Snappy destination smaller than max_compressed_length")
+    return _compress_block(src, dst.unsafe_ptr())

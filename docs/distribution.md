@@ -24,15 +24,15 @@ license tests. Neither workflow publishes to a package channel.
 
 Current local verification status is recorded in [release readiness](release-status.md).
 
-## First release sequence
+## Release sequence
 
-The candidate version is 0.1.0. The repository is
+The candidate version is 0.2.0 (0.1.0 is tagged `v0.1.0`). The repository is
 [idlab-discover/mojo-snappy](https://github.com/idlab-discover/mojo-snappy); remote and package URL metadata are configured.
 
 1. Commit the reviewed license, CI, recipe, lockfile and release documentation.
    Push the release branch and require both GitHub CI jobs to pass.
-2. Confirm workspace, package and recipe versions all equal 0.1.0 and review
-   [release notes](release-0.1.0.md). Tag that exact validated commit `v0.1.0`.
+2. Confirm workspace, package and recipe versions all equal 0.2.0 and review
+   [release notes](release-0.2.0.md). Tag that exact validated commit `v0.2.0`.
 3. Push the tag and wait for its CI run. Download its `mojo-snappy-conda-linux-64`
    artifact; check `SOURCE_COMMIT` against the tag and verify `SHA256SUMS`.
 4. Create a draft GitHub release for the existing tag with the release notes,

@@ -14,7 +14,7 @@ import pyarrow as pa
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "build/snappy-interop"
 HARNESS = '''from std.sys import argv
-from mojo_snappy import encode_snappy, decode_snappy, decode_snappy_into, compress, decompress, uncompressed_length
+from mojo_snappy import compress, compress_into, decompress, decompress_into, max_compressed_length, uncompressed_length
 
 def main() raises:
     var args = argv()
@@ -25,21 +25,23 @@ def main() raises:
     var result: List[UInt8]
     if args[1] == "encode":
         result = compress(data)
-        if result != encode_snappy(data, 32 + size + size // 6):
-            raise Error("compress changed encoded bytes")
+        var buffer = List[UInt8](length=max_compressed_length(size), fill=0)
+        var n = compress_into(data, buffer)
+        if List[UInt8](buffer[:n]) != result:
+            raise Error("compress_into changed encoded bytes")
     else:
         result = decompress(data, max_output_bytes=Int(args[4]))
-        if uncompressed_length(data) != Int(args[4]) or result != decode_snappy(data, Int(args[4])):
-            raise Error("decompress disagrees with exact-size decoder")
+        if uncompressed_length(data) != Int(args[4]) or len(result) != Int(args[4]):
+            raise Error("decompress size disagrees with header")
         var destination = List[UInt8](length=len(result) + 10, fill=179)
-        if decode_snappy_into(data, destination, len(result), 0, 5) != len(result):
-            raise Error("decode-into length mismatch")
+        if decompress_into(data, destination[5:5 + len(result)]) != len(result):
+            raise Error("decompress_into length mismatch")
         for i in range(len(result)):
             if destination[5 + i] != result[i]:
-                raise Error("decode-into byte mismatch")
+                raise Error("decompress_into byte mismatch")
         for i in range(5):
             if destination[i] != 179 or destination[5 + len(result) + i] != 179:
-                raise Error("decode-into changed destination boundary")
+                raise Error("decompress_into changed destination boundary")
     var output = open(args[3], "w")
     output.write_bytes(result)
 '''
