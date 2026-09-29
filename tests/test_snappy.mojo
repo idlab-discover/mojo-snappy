@@ -9,7 +9,7 @@ from mojo_snappy import (
     decode_snappy_into,
     snappy_max_compressed_length,
 )
-from mojo_snappy.codec import _hash_table_size, _load4, _copy, _match_length
+from mojo_snappy.codec import _hash_table_size, _load4, _match_length
 
 
 def _assert_into_matches(data: List[UInt8], expected: List[UInt8]) raises:
@@ -179,12 +179,12 @@ def test_validation_without_compiler_assertions() raises:
 
 def test_hash_state_bounds_and_word_byte_order() raises:
     assert_equal(_hash_table_size(0), 256)
-    for boundary in [256, 512, 1024, 2048, 4096, 8192, 16384]:
+    for boundary in [256, 512, 1024, 2048, 4096, 8192, 16384, 32768]:
         assert_equal(_hash_table_size(boundary - 1), boundary)
         assert_equal(_hash_table_size(boundary), boundary)
-        assert_equal(_hash_table_size(boundary + 1), min(2 * boundary, 16384))
+        assert_equal(_hash_table_size(boundary + 1), min(2 * boundary, 32768))
     # Exercise arithmetic at the format limit without allocating that input.
-    assert_equal(_hash_table_size(0xFFFFFFFF), 16384)
+    assert_equal(_hash_table_size(0xFFFFFFFF), 32768)
     for start in range(8):
         var data = List[UInt8](length=start, fill=0)
         data.append(0x01)
@@ -428,40 +428,65 @@ def test_four_byte_copy_chains_and_late_failure() raises:
                 assert_equal(destination[i], UInt8(179))
 
 
-def test_decoder_copy_capacity_transitions() raises:
-    # Exercise exact reserved boundaries independently of List growth policy.
-    for offset in [
-        1,
-        2,
-        3,
-        4,
-        5,
-        6,
-        7,
-        8,
-        9,
-        10,
-        11,
-        12,
-        13,
-        14,
-        15,
-        16,
-        17,
-        31,
-        32,
-        33,
-    ]:
-        for count in range(1, 65):
-            for spare in [0, count - 1, count, count + 1]:
-                var output = List[UInt8](capacity=offset + spare)
-                assert_equal(output.capacity(), offset + spare)
-                for i in range(offset):
-                    output.append(UInt8(i))
-                _copy(output, offset, count)
-                assert_equal(len(output), offset + count)
-                for i in range(len(output)):
-                    assert_equal(output[i], UInt8(i % offset))
+def _append_copy(mut block: List[UInt8], kind: Int, offset: Int, count: Int):
+    if kind == 1:
+        block.append(UInt8(1 | ((count - 4) << 2) | ((offset >> 8) << 5)))
+        block.append(UInt8(offset & 255))
+        return
+    block.append(UInt8(kind | ((count - 1) << 2)))
+    for i in range(2 if kind == 2 else 4):
+        block.append(UInt8((offset >> (8 * i)) & 255))
+
+
+def _append_literal(mut block: List[UInt8], bytes: List[UInt8]):
+    if len(bytes) <= 60:
+        block.append(UInt8((len(bytes) - 1) << 2))
+    else:
+        block.append(UInt8(60 << 2))
+        block.append(UInt8(len(bytes) - 1))
+    block.extend(bytes.copy())
+
+
+def _check_all_decoders(block: List[UInt8], expected: List[UInt8]) raises:
+    assert_equal(decode_snappy(block, len(expected)), expected)
+    assert_equal(decompress(block, max_output_bytes=len(expected)), expected)
+    _assert_into_matches(block, expected)
+
+
+def test_decoder_copy_positions_fast_and_exact() raises:
+    # Place each copy so it runs in the slack-using fast loop, in the exact
+    # tail, and across the transition: trailing output is 0..70 bytes and
+    # the trailing input is either tiny or large. Seeds are unique so phase
+    # or source-position errors change bytes.
+    for kind in [1, 2, 3]:
+        for offset in [1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 32, 33, 64]:
+            for count in range(1, 65):
+                if kind == 1 and (count < 4 or count > 11):
+                    continue
+                for trailer in [0, 1, 15, 16, 17, 47, 63, 64, 70]:
+                    var expected = List[UInt8]()
+                    for i in range(offset):
+                        expected.append(UInt8(17 + 3 * i))
+                    for _ in range(count):
+                        expected.append(expected[len(expected) - offset])
+                    var block = List[UInt8]()
+                    _append_varint(block, offset + count + trailer)
+                    _append_literal(block, List[UInt8](expected[:offset]))
+                    _append_copy(block, kind, offset, count)
+                    # Trailer: single-byte literals keep input slack small,
+                    # one literal of many bytes keeps it large.
+                    if trailer % 2 == 0:
+                        for i in range(trailer):
+                            block.append(0)
+                            block.append(UInt8(200 + i % 50))
+                            expected.append(UInt8(200 + i % 50))
+                    else:
+                        var literal = List[UInt8]()
+                        for i in range(trailer):
+                            literal.append(UInt8(i))
+                        _append_literal(block, literal)
+                        expected.extend(literal^)
+                    _check_all_decoders(block, expected)
 
 
 def test_decoder_literal_width_boundaries() raises:
@@ -534,36 +559,26 @@ def test_encoder_word_suffix_limits() raises:
                 _ = encode_snappy(data, len(encoded) - 1, alignment)
 
 
-def test_decoder_pattern_phases_and_capacity() raises:
-    # Unique seed bytes reveal phase errors, including periods not dividing 16.
-    # Exact capacities expose command tails and genuine reallocating growth.
-    for period in range(2, 16):
+def test_decoder_pattern_phases_and_chains() raises:
+    # Unique seed bytes reveal phase errors, including periods not dividing
+    # 16. Chains of copies at every period advance the phase repeatedly in
+    # the fast loop, then finish in the exact tail.
+    for period in range(1, 16):
         for phase in range(period):
-            for padding in [0, 15, 16, 17]:
-                var prefix = padding + period
-                for count in range(1, 65):
-                    for spare in [0, count - 1, count, count + 1]:
-                        var output = List[UInt8](capacity=prefix + spare)
-                        assert_equal(output.capacity(), prefix + spare)
-                        for _ in range(padding):
-                            output.append(201)
-                        for i in range(period):
-                            output.append(UInt8(65 + (phase + i) % period))
-                        var old_capacity = output.capacity()
-                        _copy(output, period, count)
-                        assert_equal(len(output), prefix + count)
-                        assert_true(output.capacity() >= prefix + count)
-                        if spare < count:
-                            assert_true(output.capacity() > old_capacity)
-                        else:
-                            assert_equal(output.capacity(), old_capacity)
-                        for i in range(padding):
-                            assert_equal(output[i], UInt8(201))
-                        for i in range(period + count):
-                            assert_equal(
-                                output[padding + i],
-                                UInt8(65 + (phase + i) % period),
-                            )
+            for count in range(1, 65):
+                var expected = List[UInt8]()
+                for i in range(period):
+                    expected.append(UInt8(65 + (phase + i) % period))
+                var block = List[UInt8]()
+                var repeats = 6
+                _append_varint(block, period + repeats * count)
+                block.append(UInt8((period - 1) << 2))
+                block.extend(expected.copy())
+                for _ in range(repeats):
+                    _append_copy(block, 2, period, count)
+                for _ in range(repeats * count):
+                    expected.append(expected[len(expected) - period])
+                _check_all_decoders(block, expected)
 
 
 def test_decoder_encoder_produced_patterns() raises:

@@ -35,7 +35,7 @@ The public functions borrow `List[UInt8]` inputs. For ordinary use:
 - `decompress(data, *, max_output_bytes, start=0)` decodes a raw block when its
   exact output size is unknown. The required, nonnegative cap limits decoded byte
   length. The advertised size must fit the cap, and the entire block must validate.
-  It grows output only from validated commands, without preallocating the header size.
+  Sizes the compressed input cannot produce are rejected before any allocation.
 - `uncompressed_length(data, start=0)` returns the UInt32 size advertised by the
   header, without allocating output. It rejects truncated or overflowing headers,
   but **does not validate the remaining block**. Apply your own size budget before
@@ -67,7 +67,7 @@ _ = decode_snappy_into(encoded, destination, len(data))
 
 `destination` must have enough **initialized length**, not just reserved capacity,
 for `destination_start + expected_size` bytes. Its prefix and tail remain untouched.
-Late errors may leave a partially decoded region; only consume it after success.
+Late errors may leave arbitrary bytes in the target range; only consume it after success.
 Input and destination must be distinct Lists. Reuse the buffer after consumers have
 finished with its previous contents. For a prefixed final buffer, pass its prefix
 length as `destination_start`; `start` independently selects the compressed suffix.
@@ -75,90 +75,93 @@ length as `destination_start`; `start` independently selects the compressed suff
 `compress`, `decompress`, `encode_snappy` and `decode_snappy` return newly owned
 Lists. Use `decode_snappy` when independent metadata supplies the exact output size;
 unlike a maximum, this also rejects blocks whose decoded size is smaller than expected.
-Both allocating decoders grow only after validating commands, so a header alone
-cannot trigger a large allocation. Caller-owned decoding
+Both allocating decoders allocate the advertised size up front only when the
+compressed input could produce it: each input byte decodes to at most 64/3 bytes,
+so a header alone cannot trigger an allocation beyond about 21x the input length.
+Larger advertised sizes reject immediately. Caller-owned decoding
 requires the caller to choose and allocate an acceptable output size in advance.
 Both decoders support all Snappy copy forms and overlapping backreferences and
 require no input padding.
-The encoder uses an input-sized hash table, greedy matching and adaptive search
-skipping on inputs of at least 16 KiB. Speed and compression density vary by input;
-byte-length limits are not exact allocation or RSS limits.
+The encoder is a port of Google Snappy 1.2.2 level-1 compression and produces
+byte-identical output to Google Snappy built for the same target: with SSE4.2 it
+hashes with CRC32C like a `-march=native` x86 build; elsewhere it uses the portable
+multiplicative hash of generic builds (such as distribution packages).
+Byte-length limits are not exact allocation or RSS limits: encoding always
+reserves the worst-case bound and checks `max_output_bytes` against the result.
 See [third-party notices](THIRD_PARTY_NOTICES.md) for upstream attribution.
 
 ## Benchmarks
 
-Local measurement on **2026-09-20**, AMD Ryzen 9 5950X, source commit
-`5dcd1b8`, Mojo **1.0.0**. The same 14 inputs from the existing comparison
-suite are used for all three implementations. **Local Snappy** is the retained
-Snappy 1.2.2 source build (`-O3 -g -DNDEBUG -march=native`); **distro Snappy**
-is the installed Arch Extra package **1.2.2-3**, loaded from `/usr/lib`.
-Both use compression level 1. Mojo is freshly built with `-O3`; the primary
-column uses `ASSERT=none`, with `ASSERT=all` alongside for comparison.
+Local measurement on **2026-09-30**, AMD Ryzen 9 5950X, Mojo **1.0.0**. The same
+14 inputs as earlier comparisons are used for all three implementations.
+**Local Snappy** is the retained Snappy 1.2.2 source build
+(`-O3 -g -DNDEBUG -march=native`); **distro Snappy** is the installed Arch Extra
+package **1.2.2-3**, loaded from `/usr/lib`. Both use compression level 1. Mojo is
+freshly built with `-O3` for the host CPU; the primary column uses `ASSERT=none`,
+with `ASSERT=all` alongside for comparison.
 
 **Time per call in microseconds (µs); lower is better.** Medians of seven
 shuffled rounds, calibrated to approximately 100 ms per sample, pinned to CPU 8.
 
-| Input | Operation | Mojo | Local Snappy | Distro Snappy | Mojo (assertions) |
-|---|---|---:|---:|---:|---:|
-| random-64 | encode | 0.187 | 0.084 | 0.089 | 0.196 |
-| random-64 | decode | 0.031 | 0.049 | 0.044 | 0.036 |
-| constant-64 | encode | 0.145 | 0.062 | 0.055 | 0.158 |
-| constant-64 | decode | 0.056 | 0.083 | 0.086 | 0.064 |
-| cycle-64 | encode | 0.194 | 0.084 | 0.088 | 0.201 |
-| cycle-64 | decode | 0.031 | 0.049 | 0.044 | 0.035 |
-| low-entropy-64 | encode | 0.232 | 0.088 | 0.102 | 0.241 |
-| low-entropy-64 | decode | 0.103 | 0.062 | 0.056 | 0.113 |
-| random-65536 | encode | 10.603 | 2.376 | 2.414 | 10.184 |
-| random-65536 | decode | 1.034 | 1.458 | 1.454 | 1.157 |
-| constant-65536 | encode | 7.243 | 3.244 | 3.906 | 7.955 |
-| constant-65536 | decode | 5.176 | 5.682 | 39.203 | 7.913 |
-| cycle-65536 | encode | 7.401 | 3.667 | 4.022 | 8.098 |
-| cycle-65536 | decode | 7.043 | 4.837 | 6.787 | 10.534 |
-| low-entropy-65536 | encode | 177.090 | 100.432 | 120.461 | 193.751 |
-| low-entropy-65536 | decode | 91.242 | 69.744 | 90.832 | 124.516 |
-| random-1048576 | encode | 142.498 | 45.938 | 46.760 | 142.552 |
-| random-1048576 | decode | 33.087 | 30.776 | 30.679 | 35.063 |
-| constant-1048576 | encode | 53.676 | 57.341 | 71.528 | 64.958 |
-| constant-1048576 | decode | 82.877 | 93.066 | 641.140 | 125.457 |
-| cycle-1048576 | encode | 53.960 | 60.409 | 70.650 | 65.391 |
-| cycle-1048576 | decode | 113.550 | 79.552 | 111.265 | 169.027 |
-| low-entropy-1048576 | encode | 2773.462 | 1867.047 | 2225.404 | 3066.913 |
-| low-entropy-1048576 | decode | 1603.829 | 1119.874 | 1476.166 | 2092.943 |
-| alice29.txt | encode | 414.495 | 300.894 | 372.225 | 442.111 |
-| alice29.txt | decode | 320.394 | 148.855 | 198.765 | 373.280 |
-| html | encode | 87.291 | 58.280 | 82.973 | 97.247 |
-| html | decode | 72.185 | 35.620 | 44.869 | 90.195 |
+| Input | Operation | Mojo | Local Snappy | Distro Snappy | Mojo (assertions) | Mojo / Local |
+|---|---|---:|---:|---:|---:|---:|
+| random-64 | encode | 0.094 | 0.084 | 0.089 | 0.092 | 1.12 |
+| random-64 | decode | 0.031 | 0.048 | 0.043 | 0.032 | 0.63 |
+| constant-64 | encode | 0.060 | 0.062 | 0.053 | 0.063 | 0.96 |
+| constant-64 | decode | 0.046 | 0.081 | 0.081 | 0.049 | 0.57 |
+| cycle-64 | encode | 0.092 | 0.082 | 0.088 | 0.091 | 1.12 |
+| cycle-64 | decode | 0.030 | 0.048 | 0.043 | 0.032 | 0.63 |
+| low-entropy-64 | encode | 0.101 | 0.088 | 0.102 | 0.101 | 1.15 |
+| low-entropy-64 | decode | 0.043 | 0.061 | 0.055 | 0.044 | 0.70 |
+| random-65536 | encode | 1.921 | 2.372 | 2.405 | 1.863 | 0.81 |
+| random-65536 | decode | 1.009 | 1.454 | 1.453 | 1.012 | 0.69 |
+| constant-65536 | encode | 3.110 | 3.233 | 3.868 | 3.101 | 0.96 |
+| constant-65536 | decode | 3.525 | 5.703 | 38.897 | 3.645 | 0.62 |
+| cycle-65536 | encode | 3.306 | 3.655 | 4.013 | 3.283 | 0.90 |
+| cycle-65536 | decode | 2.848 | 4.821 | 6.691 | 2.961 | 0.59 |
+| low-entropy-65536 | encode | 106.725 | 100.130 | 120.022 | 105.750 | 1.07 |
+| low-entropy-65536 | decode | 44.048 | 69.509 | 90.314 | 41.841 | 0.63 |
+| random-1048576 | encode | 33.184 | 46.020 | 46.250 | 32.115 | 0.72 |
+| random-1048576 | decode | 16.688 | 30.545 | 30.591 | 16.703 | 0.55 |
+| constant-1048576 | encode | 49.176 | 57.809 | 70.857 | 49.206 | 0.85 |
+| constant-1048576 | decode | 54.728 | 92.759 | 643.282 | 56.775 | 0.59 |
+| cycle-1048576 | encode | 52.322 | 60.460 | 70.685 | 52.052 | 0.87 |
+| cycle-1048576 | decode | 45.260 | 79.294 | 111.361 | 47.166 | 0.57 |
+| low-entropy-1048576 | encode | 1886.641 | 1863.876 | 2226.021 | 1875.975 | 1.01 |
+| low-entropy-1048576 | decode | 732.168 | 1117.286 | 1475.244 | 703.077 | 0.66 |
+| alice29.txt | encode | 273.225 | 301.048 | 370.284 | 271.279 | 0.91 |
+| alice29.txt | decode | 97.320 | 149.342 | 197.773 | 95.341 | 0.65 |
+| html | encode | 38.940 | 58.326 | 81.780 | 38.571 | 0.67 |
+| html | decode | 18.628 | 35.521 | 44.506 | 18.734 | 0.52 |
 
-**Compressed bytes; lower is better.** Both Mojo assertion modes produce
-identical output. Sizes are measured independently for each implementation.
+**Compressed bytes; lower is better.** Mojo output is byte-identical to local
+Snappy (both hash with SSE4.2 CRC32C). Built for baseline x86-64, Mojo output is
+byte-identical to the distro package instead.
 
 | Input | Raw bytes | Mojo | Local Snappy | Distro Snappy |
 |---|---:|---:|---:|---:|
 | random-64 | 64 | 67 | 67 | 67 |
 | constant-64 | 64 | 6 | 6 | 6 |
 | cycle-64 | 64 | 67 | 67 | 67 |
-| low-entropy-64 | 64 | 66 | 65 | 65 |
+| low-entropy-64 | 64 | 65 | 65 | 65 |
 | random-65536 | 65,536 | 65,542 | 65,542 | 65,542 |
 | constant-65536 | 65,536 | 3,077 | 3,077 | 3,077 |
-| cycle-65536 | 65,536 | 3,320 | 3,321 | 3,321 |
-| low-entropy-65536 | 65,536 | 53,528 | 45,441 | 45,676 |
-| random-1048576 | 1,048,576 | 1,048,583 | 1,048,627 | 1,048,627 |
-| constant-1048576 | 1,048,576 | 49,157 | 49,187 | 49,187 |
-| cycle-1048576 | 1,048,576 | 49,400 | 53,091 | 53,091 |
-| low-entropy-1048576 | 1,048,576 | 840,446 | 731,333 | 733,384 |
-| alice29.txt | 152,089 | 95,118 | 86,834 | 86,727 |
-| html | 102,400 | 24,158 | 22,653 | 22,758 |
+| cycle-65536 | 65,536 | 3,321 | 3,321 | 3,321 |
+| low-entropy-65536 | 65,536 | 45,441 | 45,441 | 45,676 |
+| random-1048576 | 1,048,576 | 1,048,627 | 1,048,627 | 1,048,627 |
+| constant-1048576 | 1,048,576 | 49,187 | 49,187 | 49,187 |
+| cycle-1048576 | 1,048,576 | 53,091 | 53,091 | 53,091 |
+| low-entropy-1048576 | 1,048,576 | 731,333 | 731,333 | 733,384 |
+| alice29.txt | 152,089 | 86,834 | 86,834 | 86,727 |
+| html | 102,400 | 22,653 | 22,653 | 22,758 |
 
 These are hot-buffer, allocating public-API measurements: each call allocates
 and frees its output. File I/O, process startup and validation are excluded.
 All decoders consume the same distro-produced stream; every producer’s output
-was byte-validated with every decoder. Native output pre-sizing and Mojo’s
-incremental output growth are included. The shared host uses dynamic clocks
+was byte-validated with every decoder. The shared host uses dynamic clocks
 without core isolation; small differences should not be treated as decisive.
-
-Reproduction commands, harnesses, input/output hashes and all raw samples are
-retained locally in gitignored `build/three-way-20260920/` (`REPRODUCE.md`).
-These artifacts are not distributed with the repository.
+Harnesses, hashes and raw samples are retained locally in the gitignored
+`build/three-way-20260930/` directory and are not distributed.
 
 ## Develop and verify
 

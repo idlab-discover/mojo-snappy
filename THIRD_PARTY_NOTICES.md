@@ -1,11 +1,13 @@
 # Google Snappy
 
-The encoder word-XOR match extension, readable initial hash candidate strategy,
-and decoder short-pattern expansion are adapted from ideas in Google Snappy
-1.2.2, revision
-`6af9287fbdb913f0794d0148c6aa43b58e63c8e3` (`FindMatchLength`,
-`CompressFragment`, `WorkingMemory::GetHashTable`,
-`Copy64BytesWithPatternExtension`, and `IncrementalCopy`).
+The encoder is a port of Google Snappy 1.2.2 level-1 compression, revision
+`6af9287fbdb913f0794d0148c6aa43b58e63c8e3`: `CompressFragment`,
+`CalculateTableSize`/`WorkingMemory::GetHashTable`, `TableEntry` hashing,
+`EmitLiteral`, `EmitCopyAtMost64`, `EmitCopy` and the 64-bit
+`FindMatchLength`. The decoder adapts ideas from the same revision: the
+`kLengthMinusOffset` tag table and branch-light command dispatch of
+`DecompressBranchless`, bounded overcopies (`MemCopy64`), and short-pattern
+extension (`Copy64BytesWithPatternExtension`, `IncrementalCopy`).
 
 Copyright 2011, Google Inc.
 All rights reserved.
