@@ -2,7 +2,7 @@
 
 ![Mojo-snappy: a flame mascot jumping down a stack of columns](assets/branding/mojo-snappy-logo-169.png)
 
-Raw Snappy compression and decompression implemented in Mojo, pinned to **Mojo 1.0.0**.
+Raw Snappy compression and decompression implemented in Mojo, pinned to **Mojo 1.1.0**.
 The library uses only the Mojo standard library. Python, PyArrow and cramjam are
 optional development oracles; they are not library runtime dependencies.
 
@@ -11,7 +11,7 @@ optional development oracles; they are not library runtime dependencies.
 - Repository and distribution: `mojo-snappy`
 - Mojo import: `mojo_snappy`
 - Precompiled artifact: `mojo_snappy.mojoc`
-- Library version: `0.2.0`, independent of the compiler version `1.0.0`
+- Library version: `0.2.0`, independent of the compiler version `1.1.0`
 
 This implements raw Snappy blocks. The optional Snappy framed stream format,
 stream identifiers and CRC32C checksums are not implemented. Parquet integration
@@ -190,7 +190,7 @@ consumer's `[workspace]` and add:
 
 ```toml
 [dependencies]
-mojo = "==1.0.0"
+mojo = "==1.1.0"
 mojo-snappy = { path = "../mojo-snappy" }
 ```
 
@@ -223,9 +223,11 @@ pixi run --locked -e packaging conda-build
 ```
 
 Artifacts are written to `build/conda/linux-64/`. The package installs
-`mojo_snappy.mojoc` under `lib/mojo` and pins the compiler to `1.0.0`.
-The initial supported build/test target is Linux x86-64. No package channel has
-been configured or publication claimed; there is no Python API or wheel.
+`mojo_snappy.mojoc` under `lib/mojo` and pins the compiler to `1.1.0`.
+The supported build/test target is Linux x86-64. Community builds are distributed
+through [modular-community](https://prefix.dev/channels/modular-community/packages/mojo-snappy),
+with [Str-Gen](https://github.com/Str-Gen) listed as the recipe maintainer.
+There is no Python API or wheel.
 
 GitHub CI runs the source/package checks, both oracle assertion modes and the
 isolated Conda installation tests. It uploads the package, SHA256 checksums and

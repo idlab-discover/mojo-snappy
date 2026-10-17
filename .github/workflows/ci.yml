@@ -23,6 +23,8 @@ jobs:
           pixi-version: v0.80.0
           environments: default oracle
           locked: true
+      - name: Verify Mojo 1.1.0 compiler
+        run: pixi run --locked mojo --version | grep -E '^Mojo 1\.1\.0 '
       - name: Source, optimized, package and example checks
         run: pixi run --locked check
       - name: PyArrow and cramjam interoperability in both assertion modes
