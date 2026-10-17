@@ -23,7 +23,7 @@ format = "mojo format src tests examples"
 check = { depends-on = ["test", "test-release", "test-package", "test-release-noassert", "test-package-noassert", "example"] }
 
 [dependencies]
-mojo = "==1.0.0"
+mojo = "==1.1.0"
 
 [package]
 name = "mojo-snappy"
@@ -40,13 +40,13 @@ name = "mojo_snappy"
 path = "src/mojo_snappy"
 
 [package.build-dependencies]
-mojo-compiler = "==1.0.0"
+mojo-compiler = "==1.1.0"
 
 [package.host-dependencies]
-mojo-compiler = "==1.0.0"
+mojo-compiler = "==1.1.0"
 
 [package.run-dependencies]
-mojo-compiler = "==1.0.0"
+mojo-compiler = "==1.1.0"
 
 [feature.oracle.dependencies]
 python = "3.12.*"

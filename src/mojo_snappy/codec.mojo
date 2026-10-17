@@ -140,7 +140,7 @@ def _read_header(src: Span[UInt8, _], mut cursor: Int) raises -> Int:
 # ---------------------------------------------------------------------------
 
 
-def _pattern_masks[trailing: Bool]() -> InlineArray[SIMD[DType.uint8, 16], 64]:
+def _pattern_masks[trailing: Bool]() -> Array[SIMD[DType.uint8, 16], 64]:
     """Shuffle masks at index 16 * chunk + offset, for offsets 1..15.
 
     Output bytes [16k, 16k + 16) of a copy repeating its `offset` preceding
@@ -151,7 +151,7 @@ def _pattern_masks[trailing: Bool]() -> InlineArray[SIMD[DType.uint8, 16], 64]:
     derive from the seed independently. The pattern-extension idea follows
     Google Snappy; see THIRD_PARTY_NOTICES.md.
     """
-    var table = InlineArray[SIMD[DType.uint8, 16], 64](
+    var table = Array[SIMD[DType.uint8, 16], 64](
         fill=SIMD[DType.uint8, 16](0)
     )
     for chunk in range(4):
@@ -197,7 +197,7 @@ def _pattern_copy_exact(
             return
 
 
-def _length_minus_offset() -> InlineArray[Int16, 256]:
+def _length_minus_offset() -> Array[Int16, 256]:
     """Per-tag length minus the tag-encoded offset bits, as in Google Snappy.
 
     The low byte is the command length. For COPY_1 the tag's offset bits are
@@ -207,7 +207,7 @@ def _length_minus_offset() -> InlineArray[Int16, 256]:
     store 0xFF, which always takes that branch and has bit 7 set, marking
     them for the exact path. See THIRD_PARTY_NOTICES.md.
     """
-    var table = InlineArray[Int16, 256](fill=0)
+    var table = Array[Int16, 256](fill=0)
     for tag in range(256):
         var data = tag >> 2
         var kind = tag & 3

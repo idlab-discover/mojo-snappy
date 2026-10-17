@@ -20,7 +20,9 @@ Build outputs are under `build/conda/linux-64/`.
 
 The existing `pixi-build-mojo` manifest remains available for local path dependencies.
 Use the explicit Conda recipe above for release artifacts and its installation/
-license tests. Neither workflow publishes to a package channel.
+license tests. This repository uploads CI artifacts; channel publication runs
+through [modular/modular-community](https://github.com/modular/modular-community/tree/main/recipes/mojo-snappy).
+The recipe lists [Str-Gen](https://github.com/Str-Gen) as maintainer.
 
 Current local verification status is recorded in [release readiness](release-status.md).
 
@@ -55,3 +57,12 @@ Reference patterns were adapted from the local Balsa project. Implementation
 references: [setup-pixi](https://github.com/prefix-dev/setup-pixi),
 [Rattler recipe/tests](https://rattler-build.prefix.dev/latest/reference/recipe_file/),
 [Pixi Mojo backend](https://pixi.prefix.dev/latest/build/backends/pixi-build-mojo/).
+
+## Mojo 1.1.0 rebuild
+
+Library version 0.2.0 build 1 pins Mojo 1.1.0 for build, host and runtime.
+The source uses `Array`, the Mojo 1.1.0 name for `InlineArray`.
+After this commit passes CI, update `recipes/mojo-snappy/recipe.yaml` in
+`modular/modular-community` with its exact source revision, `mojo_version: "==1.1.0"`, and build number 1. The community repository builds and publishes
+to `modular-community` after its maintainers merge the recipe update.
+A prefix.dev account linked to GitHub does not itself grant channel write access.
