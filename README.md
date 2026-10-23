@@ -200,8 +200,9 @@ For direct source use, pass `-I /path/to/mojo-snappy/src` to Mojo.
 
 ### Assertion policy
 
-Use `-D ASSERT=all` for development. `test-release` is optimized (`-O3`) with
-assertions enabled. Opt into a checks-disabled consumer with:
+Use `-D ASSERT=all` for development. `test-release` uses the default release
+settings, `-O3 -D ASSERT=none`. `test-release-assert` keeps optimized coverage
+with assertions enabled, and `check` runs both. Compile release consumers with:
 
 ```sh
 pixi run mojo build -O3 -D ASSERT=none -I src examples/roundtrip.mojo -o build/roundtrip-release
