@@ -11,12 +11,12 @@ No framing, Python, or external codec library is involved.
 """
 
 
-from std.bit import byte_swap, count_leading_zeros, count_trailing_zeros
+from std.bit import count_leading_zeros, count_trailing_zeros
 from std.builtin.globals import global_constant
 from std.memory import unsafe_memcpy, unsafe_memset_zero
 from std.ffi import external_call
 from std.sys import llvm_intrinsic
-from std.sys.info import CompilationTarget, is_big_endian
+from std.sys.info import CompilationTarget
 
 
 comptime _BLOCK_SIZE = 65536
@@ -33,44 +33,38 @@ comptime _INPUT_MARGIN = 15
 # ---------------------------------------------------------------------------
 
 
-@always_inline
+@inline(.always)
 def _ld16(p: Pointer[UInt8, _], i: Int) -> Int:
     var word = (
         p.unsafe_offset(i).unsafe_bitcast[UInt16]().unsafe_load[alignment=1]()
     )
-    comptime if is_big_endian():
-        word = byte_swap(word)
-    return Int(word)
+    return Int(UInt16.from_endian[.little](word))
 
 
-@always_inline
+@inline(.always)
 def _ld32(p: Pointer[UInt8, _], i: Int) -> UInt32:
     var word = (
         p.unsafe_offset(i).unsafe_bitcast[UInt32]().unsafe_load[alignment=1]()
     )
-    comptime if is_big_endian():
-        word = byte_swap(word)
-    return word
+    return UInt32.from_endian[.little](word)
 
 
-@always_inline
+@inline(.always)
 def _ld64(p: Pointer[UInt8, _], i: Int) -> UInt64:
     var word = (
         p.unsafe_offset(i).unsafe_bitcast[UInt64]().unsafe_load[alignment=1]()
     )
-    comptime if is_big_endian():
-        word = byte_swap(word)
-    return word
+    return UInt64.from_endian[.little](word)
 
 
-@always_inline
-def _st32(p: Pointer[mut=True, UInt8, _], i: Int, var value: UInt32):
-    comptime if is_big_endian():
-        value = byte_swap(value)
-    p.unsafe_offset(i).unsafe_bitcast[UInt32]().unsafe_store[alignment=1](value)
+@inline(.always)
+def _st32(p: Pointer[mut=True, UInt8, _], i: Int, value: UInt32):
+    p.unsafe_offset(i).unsafe_bitcast[UInt32]().unsafe_store[alignment=1](
+        value.to_endian[.little]()
+    )
 
 
-@always_inline
+@inline(.always)
 def _copy16(
     dst: Pointer[mut=True, UInt8, _],
     d: Int,
@@ -82,13 +76,13 @@ def _copy16(
     )
 
 
-@always_inline
+@inline(.always)
 def _self_copy16(p: Pointer[mut=True, UInt8, _], d: Int, s: Int):
     """Copy 16 bytes within one buffer; the load completes before the store."""
     p.unsafe_offset(d).unsafe_store(p.unsafe_offset(s).unsafe_load[width=16]())
 
 
-@always_inline
+@inline(.always)
 def _copy_bytes(
     dst: Pointer[mut=True, UInt8, _],
     d: Int,
@@ -151,9 +145,7 @@ def _pattern_masks[trailing: Bool]() -> Array[SIMD[DType.uint8, 16], 64]:
     derive from the seed independently. The pattern-extension idea follows
     Google Snappy; see THIRD_PARTY_NOTICES.md.
     """
-    var table = Array[SIMD[DType.uint8, 16], 64](
-        fill=SIMD[DType.uint8, 16](0)
-    )
+    var table = Array[SIMD[DType.uint8, 16], 64](fill=SIMD[DType.uint8, 16](0))
     for chunk in range(4):
         for offset in range(1, 16):
             for i in range(16):
@@ -168,7 +160,7 @@ comptime _PATTERN_MASKS = _pattern_masks[False]()
 comptime _TRAILING_PATTERN_MASKS = _pattern_masks[True]()
 
 
-@no_inline
+@inline(.never)
 def _pattern_copy_exact(
     dst: Pointer[mut=True, UInt8, _], op: Int, offset: Int, length: Int
 ):
@@ -233,7 +225,7 @@ comptime _FAST_OUTPUT_MARGIN = 64
 """Fast-loop output slack: every fast command writes at most 64 bytes."""
 
 
-@always_inline
+@inline(.always)
 def _decode_fast(
     src: Pointer[UInt8, _],
     mut ip: Int,
@@ -327,7 +319,7 @@ def _decode_fast(
         op += length
 
 
-@always_inline
+@inline(.always)
 def _decode_block(
     src: Pointer[UInt8, _],
     var ip: Int,
@@ -499,7 +491,7 @@ def _hash_table_size(size: Int) -> Int:
     return count
 
 
-@always_inline
+@inline(.always)
 def _table_index(word: UInt32, mask: UInt32) -> Int:
     """Map a little-endian word to a 16-bit table entry index.
 
@@ -514,7 +506,7 @@ def _table_index(word: UInt32, mask: UInt32) -> Int:
     return Int(hash & mask) >> 1
 
 
-@always_inline
+@inline(.always)
 def _select_if_zero(key: UInt32, if_zero: UInt64, otherwise: UInt64) -> UInt64:
     """Branch-free select: this choice is unpredictable and on the critical path.
     """
@@ -522,7 +514,7 @@ def _select_if_zero(key: UInt32, if_zero: UInt64, otherwise: UInt64) -> UInt64:
     return (if_zero & keep) | (otherwise & ~keep)
 
 
-@always_inline
+@inline(.always)
 def _find_match_length(
     src: Pointer[UInt8, _], s1: Int, s2: Int, limit: Int, mut data: UInt64
 ) -> Int:
@@ -569,7 +561,7 @@ def _find_match_length(
     return matched
 
 
-@always_inline
+@inline(.always)
 def _emit_literal[
     fast: Bool
 ](
@@ -612,7 +604,7 @@ def _emit_literal[
     return op + length
 
 
-@always_inline
+@inline(.always)
 def _emit_copy_at_most_64(
     dst: Pointer[mut=True, UInt8, _], op: Int, offset: Int, length: Int
 ) -> Int:
@@ -633,7 +625,7 @@ def _emit_copy_at_most_64(
     return op + 3
 
 
-@always_inline
+@inline(.always)
 def _emit_copy(
     dst: Pointer[mut=True, UInt8, _], var op: Int, offset: Int, var length: Int
 ) -> Int:
@@ -648,7 +640,7 @@ def _emit_copy(
     return _emit_copy_at_most_64(dst, op, offset, length)
 
 
-@always_inline
+@inline(.always)
 def _probe16(
     src: Pointer[UInt8, _],
     base: Int,
