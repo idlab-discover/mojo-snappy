@@ -45,11 +45,13 @@ not from `v0.2.0`. See the table in the [0.2.1 release notes](release-0.2.1.md).
 
 1. Merge the release commit to `main` after both GitHub CI jobs pass. Workspace,
    package and recipe versions must all equal the release version, with build 0.
-2. Tag that merge commit `v<version>` (annotated), push the tag and wait for its CI run.
-   Download its `mojo-snappy-conda-linux-64` artifact; check `SOURCE_COMMIT`
-   against the tag and verify `SHA256SUMS`.
-3. Create a draft GitHub release for the tag with `docs/release-<version>.md`,
-   the `.conda` file, checksum file and source-commit record. Review and publish it.
+2. Tag that merge commit with an annotated `v<version>` tag and push the tag.
+   The Release workflow checks that the tag is on `main` and matches the
+   versions, build number 0 and `docs/release-<version>.md`. It runs the full
+   CI, checks the artifact's `SOURCE_COMMIT` and `SHA256SUMS`, and creates a
+   draft GitHub release with the notes, `.conda` file, checksum file and
+   source-commit record.
+3. Review the draft release and publish it.
 4. Update `recipes/mojo-snappy/recipe.yaml` in `modular/modular-community`:
    version, `mojo_version`, build number 0 and the tag's commit as `rev`. Build it
    locally with upstream's Rattler-Build version, variants and channel order,
@@ -63,10 +65,13 @@ Python wheel.
 
 ## CI behavior
 
-The workflow runs on pushes, pull requests and manual dispatch. It uses pinned
+CI runs on branch pushes, pull requests and manual dispatch. It uses pinned
 GitHub action revisions, locked Pixi environments, read-only repository permission,
 and uploads the Conda artifact with SHA256 checksums and exact checkout commit.
-It does not create tags, GitHub releases or channel uploads automatically.
+
+`v*` tag pushes run the Release workflow instead. It calls CI and releases the
+artifact that CI tested. Only its draft-release job has write permission. It
+does not publish the release, overwrite an existing one, or upload to a Conda channel.
 
 Reference patterns were adapted from the local Balsa project. Implementation
 references: [setup-pixi](https://github.com/prefix-dev/setup-pixi),
