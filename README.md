@@ -2,7 +2,7 @@
 
 ![Mojo-snappy: a flame mascot jumping down a stack of columns](assets/branding/mojo-snappy-logo-169.png)
 
-Raw Snappy compression and decompression implemented in Mojo, pinned to **Mojo 1.1.0**.
+Raw Snappy compression and decompression implemented in Mojo, pinned to **Mojo 1.2.0**.
 The library uses only the Mojo standard library. Python, PyArrow and cramjam are
 optional development oracles; they are not library runtime dependencies.
 
@@ -11,7 +11,7 @@ optional development oracles; they are not library runtime dependencies.
 - Repository and distribution: `mojo-snappy`
 - Mojo import: `mojo_snappy`
 - Precompiled artifact: `mojo_snappy.mojoc`
-- Library version: `0.2.0`, independent of the compiler version `1.1.0`
+- Library version: `0.2.1`, independent of the compiler version `1.2.0`
 
 This implements raw Snappy blocks. The optional Snappy framed stream format,
 stream identifiers and CRC32C checksums are not implemented. Parquet integration
@@ -190,7 +190,7 @@ consumer's `[workspace]` and add:
 
 ```toml
 [dependencies]
-mojo = "==1.1.0"
+mojo = "==1.2.0"
 mojo-snappy = { path = "../mojo-snappy" }
 ```
 
@@ -200,8 +200,9 @@ For direct source use, pass `-I /path/to/mojo-snappy/src` to Mojo.
 
 ### Assertion policy
 
-Use `-D ASSERT=all` for development. `test-release` is optimized (`-O3`) with
-assertions enabled. Opt into a checks-disabled consumer with:
+Use `-D ASSERT=all` for development. `test-release` uses the default release
+settings, `-O3 -D ASSERT=none`. `test-release-assert` keeps optimized coverage
+with assertions enabled, and `check` runs both. Compile release consumers with:
 
 ```sh
 pixi run mojo build -O3 -D ASSERT=none -I src examples/roundtrip.mojo -o build/roundtrip-release
@@ -223,7 +224,7 @@ pixi run --locked -e packaging conda-build
 ```
 
 Artifacts are written to `build/conda/linux-64/`. The package installs
-`mojo_snappy.mojoc` under `lib/mojo` and pins the compiler to `1.1.0`.
+`mojo_snappy.mojoc` under `lib/mojo` and pins the compiler to `1.2.0`.
 The supported build/test target is Linux x86-64. Community builds are distributed
 through [modular-community](https://prefix.dev/channels/modular-community/packages/mojo-snappy),
 with [Str-Gen](https://github.com/Str-Gen) listed as the recipe maintainer.
@@ -231,8 +232,9 @@ There is no Python API or wheel.
 
 GitHub CI runs the source/package checks, both oracle assertion modes and the
 isolated Conda installation tests. It uploads the package, SHA256 checksums and
-checkout commit as CI artifacts. See [distribution and tagging](docs/distribution.md)
-the [0.2.0 release notes](docs/release-0.2.0.md) and the
+checkout commit as CI artifacts. See [distribution and tagging](docs/distribution.md),
+the [0.2.1 release notes](docs/release-0.2.1.md), the
+[0.2.0 release notes](docs/release-0.2.0.md) and the
 [0.1.0 release notes](docs/release-0.1.0.md).
 
 ## License

@@ -3,7 +3,7 @@ authors = ["Str-Gen <20303842+Str-Gen@users.noreply.github.com>"]
 channels = ["https://conda.modular.com/max", "conda-forge"]
 name = "mojo-snappy"
 platforms = ["linux-64"]
-version = "0.2.0"
+version = "0.2.1"
 description = "Raw Snappy compression and decompression in Mojo"
 preview = ["pixi-build"]
 license = "Apache-2.0"
@@ -13,21 +13,21 @@ homepage = "https://github.com/idlab-discover/mojo-snappy"
 
 [tasks]
 test = "mojo run -D ASSERT=all -I src tests/test_snappy.mojo"
-test-release = "mkdir -p build && mojo build -O3 -D ASSERT=all -I src tests/test_snappy.mojo -o build/test-snappy && build/test-snappy"
-test-release-noassert = "mkdir -p build && mojo build -O3 -D ASSERT=none -I src tests/test_snappy.mojo -o build/test-snappy-noassert && build/test-snappy-noassert"
+test-release = "mkdir -p build && mojo build -O3 -D ASSERT=none -I src tests/test_snappy.mojo -o build/test-snappy && build/test-snappy"
+test-release-assert = "mkdir -p build && mojo build -O3 -D ASSERT=all -I src tests/test_snappy.mojo -o build/test-snappy-assert && build/test-snappy-assert"
 package = "mkdir -p build && mojo precompile src/mojo_snappy -o build/mojo_snappy.mojoc"
 test-package = { cmd = "mojo run -D ASSERT=all -I build tests/test_snappy.mojo", depends-on = ["package"] }
 test-package-noassert = { cmd = "mojo run -O3 -D ASSERT=none -I build tests/test_snappy.mojo", depends-on = ["package"] }
 example = "mojo run -I src examples/roundtrip.mojo"
 format = "mojo format src tests examples"
-check = { depends-on = ["test", "test-release", "test-package", "test-release-noassert", "test-package-noassert", "example"] }
+check = { depends-on = ["test", "test-release", "test-package", "test-release-assert", "test-package-noassert", "example"] }
 
 [dependencies]
-mojo = "==1.1.0"
+mojo = "==1.2.0"
 
 [package]
 name = "mojo-snappy"
-version = "0.2.0"
+version = "0.2.1"
 license = "Apache-2.0 AND BSD-3-Clause"
 repository = "https://github.com/idlab-discover/mojo-snappy"
 homepage = "https://github.com/idlab-discover/mojo-snappy"
@@ -40,13 +40,13 @@ name = "mojo_snappy"
 path = "src/mojo_snappy"
 
 [package.build-dependencies]
-mojo-compiler = "==1.1.0"
+mojo-compiler = "==1.2.0"
 
 [package.host-dependencies]
-mojo-compiler = "==1.1.0"
+mojo-compiler = "==1.2.0"
 
 [package.run-dependencies]
-mojo-compiler = "==1.1.0"
+mojo-compiler = "==1.2.0"
 
 [feature.oracle.dependencies]
 python = "3.12.*"
