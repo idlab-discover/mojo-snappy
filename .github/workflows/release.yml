@@ -1,0 +1,84 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Check tag, versions, build number and release notes
+        id: version
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+          fail() { echo "::error::$1"; exit 1; }
+          # Ask GitHub: checkout may rewrite local tag refs.
+          tag_type="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq .object.type)"
+          [ "$tag_type" = tag ] || fail "$tag must be an annotated tag"
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || fail "$tag is not on main"
+          mapfile -t pixi_versions < <(grep -E '^version = "' pixi.toml | cut -d'"' -f2)
+          [ "${#pixi_versions[@]}" -eq 2 ] || fail "expected workspace and package versions in pixi.toml"
+          for v in "${pixi_versions[@]}"; do
+            [ "$v" = "$version" ] || fail "pixi.toml version $v does not match $tag"
+          done
+          recipe_version="$(grep -E '^  version: "' conda.recipe/recipe.yaml | cut -d'"' -f2)"
+          [ "$recipe_version" = "$version" ] || fail "recipe version $recipe_version does not match $tag"
+          # A new tag is new source: recipe-only rebuilds increment the build number without a tag.
+          grep -qE '^  number: 0$' conda.recipe/recipe.yaml || fail "recipe build number must be 0 for a tagged release"
+          [ -f "docs/release-$version.md" ] || fail "docs/release-$version.md is missing"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  ci:
+    needs: verify
+    uses: ./.github/workflows/ci.yml
+
+  draft-release:
+    needs: [verify, ci]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: mojo-snappy-conda-linux-64
+          path: dist
+      - name: Check artifact against the tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          [ "$(cat SOURCE_COMMIT)" = "$GITHUB_SHA" ] || { echo "::error::SOURCE_COMMIT does not match $GITHUB_SHA"; exit 1; }
+          sha256sum -c SHA256SUMS
+          ls ./mojo-snappy-${{ needs.verify.outputs.version }}-*_0.conda
+      - name: Create draft GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          # Fails if a release for this tag already exists; publishing stays a manual review step.
+          gh release create "$GITHUB_REF_NAME" --draft --verify-tag \
+            --title "mojo-snappy $VERSION" \
+            --notes-file "docs/release-$VERSION.md" \
+            dist/*.conda dist/SHA256SUMS dist/SOURCE_COMMIT
