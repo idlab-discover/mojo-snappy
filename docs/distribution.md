@@ -26,25 +26,40 @@ The recipe lists [Str-Gen](https://github.com/Str-Gen) as maintainer.
 
 Current local verification status is recorded in [release readiness](release-status.md).
 
+## Versions and build numbers
+
+A Conda artifact is identified by name, version and build string. This recipe
+has no variant keys, so the build string is always `hb0f4dca_<build number>`
+and the build number alone separates artifacts of one version. The
+modular-community CI builds with `--skip-existing=all`: an unchanged
+name/version/build is skipped, not rebuilt.
+
+- New source or a new compiler pin: new library version and tag, build number 0.
+- Same tagged source, recipe-only fix (metadata, tests, license files):
+  same version, build number + 1.
+
+0.2.0 builds 0 and 1 predate this rule; build 1 was compiled from `83a08c6`,
+not from `v0.2.0`. See the table in the [0.2.1 release notes](release-0.2.1.md).
+
 ## Release sequence
 
-The candidate version is 0.2.0 (0.1.0 is tagged `v0.1.0`). The repository is
-[idlab-discover/mojo-snappy](https://github.com/idlab-discover/mojo-snappy); remote and package URL metadata are configured.
+1. Merge the release commit to `main` after both GitHub CI jobs pass. Workspace,
+   package and recipe versions must all equal the release version, with build 0.
+2. Tag that merge commit `v<version>` (annotated), push the tag and wait for its CI run.
+   Download its `mojo-snappy-conda-linux-64` artifact; check `SOURCE_COMMIT`
+   against the tag and verify `SHA256SUMS`.
+3. Create a draft GitHub release for the tag with `docs/release-<version>.md`,
+   the `.conda` file, checksum file and source-commit record. Review and publish it.
+4. Update `recipes/mojo-snappy/recipe.yaml` in `modular/modular-community`:
+   version, `mojo_version`, build number 0 and the tag's commit as `rev`. Build it
+   locally with upstream's Rattler-Build version, variants and channel order,
+   then open the PR with the upstream checklist. The package reaches
+   `modular-community` only after a maintainer merges it and the upload job runs.
 
-1. Commit the reviewed license, CI, recipe, lockfile and release documentation.
-   Push the release branch and require both GitHub CI jobs to pass.
-2. Confirm workspace, package and recipe versions all equal 0.2.0 and review
-   [release notes](release-0.2.0.md). Tag that exact validated commit `v0.2.0`.
-3. Push the tag and wait for its CI run. Download its `mojo-snappy-conda-linux-64`
-   artifact; check `SOURCE_COMMIT` against the tag and verify `SHA256SUMS`.
-4. Create a draft GitHub release for the existing tag with the release notes,
-   `.conda` file, checksum file and source-commit record. Review and publish it.
-
-Do not move an existing release tag. A local package or CI artifact does not mean
-that the package is available through a public Conda channel. Channel publication
-is a separate step requiring a chosen channel and credentials; an upstream recipe
-submission should use the release commit/hash instead of `source: path: ..`.
-PyPI distribution is not configured, and a Conda package is not a Python wheel.
+Do not move an existing release tag. A local package, CI artifact or GitHub
+release does not mean that the package is available through a public Conda
+channel. PyPI distribution is not configured, and a Conda package is not a
+Python wheel.
 
 ## CI behavior
 
@@ -58,21 +73,3 @@ references: [setup-pixi](https://github.com/prefix-dev/setup-pixi),
 [Rattler recipe/tests](https://rattler-build.prefix.dev/latest/reference/recipe_file/),
 [Pixi Mojo backend](https://pixi.prefix.dev/latest/build/backends/pixi-build-mojo/).
 
-## Mojo 1.2.0 rebuild
-
-Library version 0.2.0 build 2 pins Mojo 1.2.0 for build, host and runtime,
-superseding the pending 1.1.0 bump. The lockfile and CI compiler check use the
-same version.
-
-Following the [Mojo 1.2.0 changelog](https://mojolang.org/releases/v1.2.0/),
-little-endian loads and stores use `SIMD.from_endian[.little]` and
-`to_endian[.little]` instead of the deprecated `is_big_endian()` predicate
-and manual byte swaps. Inline hints use `@inline(.always)` and
-`@inline(.never)`. The `Array` migration from 1.1.0 remains in place.
-
-After this commit passes CI, update `recipes/mojo-snappy/recipe.yaml` in
-`modular/modular-community` with its exact source revision,
-`mojo_version: "==1.2.0"`, and build number 2. The community repository builds
-and publishes to `modular-community` after its maintainers merge the recipe
-update. A prefix.dev account linked to GitHub does not itself grant channel
-write access.

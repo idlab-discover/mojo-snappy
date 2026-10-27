@@ -11,7 +11,7 @@ optional development oracles; they are not library runtime dependencies.
 - Repository and distribution: `mojo-snappy`
 - Mojo import: `mojo_snappy`
 - Precompiled artifact: `mojo_snappy.mojoc`
-- Library version: `0.2.0`, independent of the compiler version `1.2.0`
+- Library version: `0.2.1`, independent of the compiler version `1.2.0`
 
 This implements raw Snappy blocks. The optional Snappy framed stream format,
 stream identifiers and CRC32C checksums are not implemented. Parquet integration
@@ -232,8 +232,9 @@ There is no Python API or wheel.
 
 GitHub CI runs the source/package checks, both oracle assertion modes and the
 isolated Conda installation tests. It uploads the package, SHA256 checksums and
-checkout commit as CI artifacts. See [distribution and tagging](docs/distribution.md)
-the [0.2.0 release notes](docs/release-0.2.0.md) and the
+checkout commit as CI artifacts. See [distribution and tagging](docs/distribution.md),
+the [0.2.1 release notes](docs/release-0.2.1.md), the
+[0.2.0 release notes](docs/release-0.2.0.md) and the
 [0.1.0 release notes](docs/release-0.1.0.md).
 
 ## License

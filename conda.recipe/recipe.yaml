@@ -1,5 +1,5 @@
 context:
-  version: "0.2.0"
+  version: "0.2.1"
 
 package:
   name: mojo-snappy
@@ -17,7 +17,7 @@ source:
     - README.md
 
 build:
-  number: 2
+  number: 0
   skip: not linux or not x86_64
   files:
     - lib/mojo/mojo_snappy.mojoc
